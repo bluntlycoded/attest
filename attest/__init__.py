@@ -22,6 +22,13 @@ which is deliberate: the part of the system that acts on production traffic
 should not be something anyone has to take on faith.
 """
 
+from .approval import (
+    AdaptiveThresholds,
+    ApprovalPolicy,
+    ApprovalRecord,
+    Outcome,
+    RubberStampDetector,
+)
 from .delegation import ChainTrust, DelegationParams, effective_trust
 from .engine import AttestEngine, Decision, Verification, Verifier
 from .evidence import AgentProfile, Calibrator, Envelope, LogisticRiskScorer
@@ -34,6 +41,11 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AgentProfile",
+    "RubberStampDetector",
+    "Outcome",
+    "ApprovalRecord",
+    "ApprovalPolicy",
+    "AdaptiveThresholds",
     "AgentRecord",
     "Action",
     "AttestEngine",

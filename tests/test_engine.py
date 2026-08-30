@@ -71,21 +71,67 @@ def test_enforcing_mode_requires_a_verifier():
         AttestEngine(shadow=False)
 
 
-def test_shadow_and_enforcing_produce_identical_decision_streams():
-    """Shadow numbers are only useful if they predict enforcement."""
+def _silent_verifier(agent_id, decision):
+    """A verifier that performs a check but learns nothing about the agent."""
+    from attest.approval import Outcome
+
+    return Verification(
+        agent_id=agent_id,
+        timestamp=decision.timestamp,
+        compromised=False,
+        outcome=Outcome.TIMEOUT,
+    )
+
+
+def test_shadow_matches_enforcing_when_no_outcome_comes_back():
+    """With nothing learned, the two paths are identical step for step."""
 
     def decisions(shadow):
         engine = AttestEngine(
-            verifier=RecordingVerifier(),
-            shadow=shadow,
-            store=InMemoryStore(),
+            verifier=_silent_verifier, shadow=shadow, store=InMemoryStore()
         )
         return [
             (d.action, round(d.trust, 9))
-            for d in (engine.observe(_env(i, signature_valid=i % 3 == 0)) for i in range(300))
+            for d in (
+                engine.observe(_env(i, signature_valid=i % 3 == 0))
+                for i in range(300)
+            )
         ]
 
     assert decisions(True) == decisions(False)
+
+
+def test_shadow_diverges_once_answers_start_coming_back():
+    """The honest limit of shadow mode.
+
+    A shadow deployment never learns what a reviewer would have said, so it
+    cannot reproduce the state an approval or a rejection leaves behind. It
+    predicts enforcement only up to the first informative outcome - which is
+    worth knowing before quoting a shadow number as what enforcement will do.
+    """
+    from attest.approval import Outcome
+
+    def approving(agent_id, decision):
+        return Verification(
+            agent_id=agent_id,
+            timestamp=decision.timestamp,
+            compromised=False,
+            outcome=Outcome.APPROVED,
+            approver="alice",
+            latency_seconds=30.0,
+        )
+
+    def run(shadow):
+        engine = AttestEngine(
+            verifier=approving, shadow=shadow, store=InMemoryStore()
+        )
+        for i in range(300):
+            engine.observe(_env(i, signature_valid=i % 3 == 0))
+        return engine
+
+    shadow, enforcing = run(True), run(False)
+    # The approved agent ends up better off than the shadow run believes.
+    assert enforcing.trust_of("agent-a") > shadow.trust_of("agent-a")
 
 
 def test_trust_resets_after_a_verification():

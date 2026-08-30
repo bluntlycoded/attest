@@ -39,3 +39,7 @@ service-account*.json
 *.db
 *.db-wal
 *.db-shm
+
+# Downloaded corpora - never commit these
+data/
+*.txt.gz

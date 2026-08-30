@@ -221,6 +221,28 @@ class TrustState:
             updated_at=at,
         )
 
+    def vouch(self, weight: float, at: float, params: TrustParams) -> "TrustState":
+        """Fold in good evidence only, the mirror of :meth:`penalize`.
+
+        A human approving an action is not the same kind of evidence as another
+        quiet message. It is a person having looked and said this was fine, and
+        it should leave the agent better off than a neutral prior rather than
+        merely un-penalised.
+
+        Args:
+            weight: Good evidence to add, in units of clean observations. Three
+                is roughly "as reassuring as three uneventful messages".
+            at: Unix timestamp of the approval.
+        """
+        if weight < 0.0:
+            raise ValueError(f"weight must be non-negative, got {weight}")
+        decay = self._decay_factor(at, params)
+        return TrustState(
+            r=decay * self.r + weight,
+            s=decay * self.s,
+            updated_at=at,
+        )
+
     def decayed(self, at: float, params: TrustParams) -> "TrustState":
         """Apply forgetting without folding in new evidence.
 

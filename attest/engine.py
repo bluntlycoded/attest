@@ -16,11 +16,18 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 
+from .approval import (
+    AdaptiveThresholds,
+    ApprovalPolicy,
+    ApprovalRecord,
+    Outcome,
+    RubberStampDetector,
+)
 from .delegation import DelegationParams, backflow_weights, effective_trust
 from .evidence import Envelope, LogisticRiskScorer
 from .policy import Action, Budget, PolicyParams, Reason, decide
 from .store import InMemoryStore, StateStore
-from .trust import TrustParams
+from .trust import TrustParams, TrustState
 
 __all__ = ["Decision", "Verification", "Verifier", "AttestEngine"]
 
@@ -72,12 +79,30 @@ class Decision:
 
 @dataclass(frozen=True)
 class Verification:
-    """Outcome of an attempted verification."""
+    """Outcome of an attempted verification.
+
+    Attributes:
+        compromised: Whether the check found the agent compromised.
+        outcome: Richer result for approval workflows. Left UNKNOWN, it is
+            derived from ``compromised`` so existing verifiers keep working.
+        approver: Who answered, when a human did. Required for rubber-stamp
+            detection, which is measured per approver.
+        latency_seconds: How long they took to answer.
+    """
 
     agent_id: str
     timestamp: float
     compromised: bool
     detail: str = ""
+    outcome: Outcome = Outcome.UNKNOWN
+    approver: str | None = None
+    latency_seconds: float | None = None
+
+    def resolved(self) -> Outcome:
+        """The effective outcome, inferring one if the verifier gave none."""
+        if self.outcome is not Outcome.UNKNOWN:
+            return self.outcome
+        return Outcome.REJECTED if self.compromised else Outcome.APPROVED
 
 
 class Verifier(Protocol):
@@ -119,6 +144,7 @@ class AttestEngine:
         shadow: bool = True,
         warmup_events: int = 50,
         delegation: DelegationParams | None = None,
+        approval: ApprovalPolicy | None = None,
     ) -> None:
         # Explicit None checks rather than `or`: an empty store is falsy, so
         # `store or InMemoryStore()` silently discards a freshly-loaded one.
@@ -135,6 +161,11 @@ class AttestEngine:
         self.delegation = (
             delegation if delegation is not None else DelegationParams()
         )
+        self.approval = approval if approval is not None else ApprovalPolicy()
+        # Per-agent latitude earned through approvals, and the measurement of
+        # whether those approvals still mean anything.
+        self.thresholds = AdaptiveThresholds(self.approval)
+        self.rubber_stamp = RubberStampDetector()
         self._listeners: list[Callable[[Decision], None]] = []
 
         if not shadow and verifier is None:
@@ -188,6 +219,42 @@ class AttestEngine:
             )
             self.store.put(principal)
 
+    def _apply_outcome(
+        self, result, state: TrustState, at: float
+    ) -> TrustState:
+        """Fold a verification result back into the target's trust.
+
+        Uninformative outcomes - a timeout, an infrastructure failure - leave
+        the reset prior in place. They say nothing about the agent, and reading
+        silence as consent is how a control becomes decoration.
+        """
+        if result is None:
+            return state
+
+        outcome = result.resolved()
+        policy = self.approval
+
+        if outcome is Outcome.APPROVED or (
+            outcome is Outcome.TIMEOUT and policy.timeout_is_approval
+        ):
+            state = state.vouch(policy.approval_vouch, at, self.trust_params)
+        elif outcome is Outcome.REJECTED:
+            state = state.penalize(policy.rejection_penalty, at, self.trust_params)
+
+        self.thresholds.record(result.agent_id, outcome, at)
+
+        if result.approver is not None and result.latency_seconds is not None:
+            self.rubber_stamp.record(
+                ApprovalRecord(
+                    agent_id=result.agent_id,
+                    approver=result.approver,
+                    outcome=outcome,
+                    requested_at=at,
+                    latency_seconds=result.latency_seconds,
+                )
+            )
+        return state
+
     def observe(self, env: Envelope) -> Decision:
         """Process one envelope and return the resulting decision.
 
@@ -222,11 +289,19 @@ class AttestEngine:
         target_record = (
             record if chain.target == env.sender else self.store.get(chain.target)
         )
+        # An agent that keeps being approved has earned a looser threshold;
+        # one that keeps being rejected has earned a tighter one.
+        tuned = replace(
+            self.policy_params,
+            theta_low=self.thresholds.theta_low_for(
+                chain.target, self.policy_params.theta_low, env.timestamp
+            ),
+        )
         action, policy_state, reason = decide(
             target_record.policy,
             chain.score,
             env.timestamp,
-            self.policy_params,
+            tuned,
             budget=self.budget,
         )
 
@@ -250,14 +325,23 @@ class AttestEngine:
             # so trust returns to the prior either way. Reset the agent that
             # was actually checked - resetting anyone else would clear a score
             # nobody verified.
-            if chain.target == env.sender:
-                trust_state = trust_state.reset(env.timestamp)
-            else:
-                target_record.trust = target_record.trust.reset(env.timestamp)
+            settled = (
+                trust_state if chain.target == env.sender else target_record.trust
+            ).reset(env.timestamp)
 
             if not self.shadow and self.verifier is not None:
-                self.verifier(chain.target, decision)
+                result = self.verifier(chain.target, decision)
+                # The answer is evidence in its own right. Discarding it would
+                # leave an agent a person just vouched for in exactly the state
+                # of one they just rejected, and would teach the reviewer that
+                # their answer changed nothing.
+                settled = self._apply_outcome(result, settled, env.timestamp)
                 decision = replace(decision, enforced=True)
+
+            if chain.target == env.sender:
+                trust_state = settled
+            else:
+                target_record.trust = settled
 
         record.trust = trust_state
         target_record.policy = policy_state
