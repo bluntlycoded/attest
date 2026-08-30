@@ -135,6 +135,7 @@ export default function DecisionsPage() {
                   <th className="pb-2 pr-3 font-normal">Agent</th>
                   <th className="pb-2 pr-3 text-right font-normal">p</th>
                   <th className="pb-2 pr-3 text-right font-normal">Trust</th>
+                  <th className="pb-2 pr-3 text-right font-normal">Chain</th>
                   <th className="pb-2 pr-3 font-normal">Action</th>
                   <th className="pb-2 font-normal">Reason</th>
                 </tr>
@@ -166,9 +167,32 @@ export default function DecisionsPage() {
                     >
                       {d.trust.toFixed(3)}
                     </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {d.chain.length > 1 ? (
+                        <span
+                          className="tnum text-amber-400"
+                          title={`acting for ${d.chain.slice(0, -1).join(" > ")}`}
+                        >
+                          {(d.effective_trust ?? d.trust).toFixed(3)}
+                        </span>
+                      ) : (
+                        <span className="text-ink-600">—</span>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-3">
                       {d.action === "verify" ? (
-                        <Badge tone="warn">verify</Badge>
+                        <Badge
+                          tone="warn"
+                          title={
+                            d.target && d.target !== d.agent_id
+                              ? `aimed at ${d.target}, the chain's weakest link - not at the sender`
+                              : undefined
+                          }
+                        >
+                          {d.target && d.target !== d.agent_id
+                            ? `verify ${d.target}`
+                            : "verify"}
+                        </Badge>
                       ) : (
                         <span className="text-ink-500">observe</span>
                       )}

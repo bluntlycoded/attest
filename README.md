@@ -91,6 +91,40 @@ Two honest caveats the benchmark surfaces:
 - Under a hard token-bucket budget cap (`--budget`), rather than a tuned threshold, raw thresholding does *better* than the trust layer on this generator. The simulated detector is close to an oracle, and when scores are that clean there is little sub-certain evidence left for the trust layer to integrate. The advantage above is real but it lives in the threshold-tuning framing, not every framing.
 - **The trust calculus requires calibrated probabilities.** The recurrence treats `p` as an expected count of bad evidence. If a benign agent's scores average far above zero, `w` scales that into a steady-state trust below `θ_low`, and the policy fires on well-behaved agents and then disarms. `attest bench --detector-quality 1.5` shows this failure outright: containment collapses to 0.017. This is pinned by a test so it cannot quietly disappear.
 
+## Delegation chains
+
+Scoring each agent alone misses the failure that matters most: a compromised orchestrator that never touches anything sensitive itself, and instead has five perfectly healthy workers do it. Its own messages look ordinary, because all it sends is instructions.
+
+Two mechanisms, deliberately asymmetric:
+
+- **Effective trust flows down.** An action is worth no more than the weakest link in the chain that authorised it. The policy runs against the chain's effective trust, not the sender's own — and the worker's own score is left untouched, because the worker did nothing wrong.
+- **Bad evidence flows up.** A delegate's misbehaviour is charged, in part, to its principal. Good evidence does not flow up: otherwise a compromised principal could rebuild its score by having a healthy delegate do a lot of innocuous work.
+
+The scheduling consequence is the point. A verification is aimed at the **weakest link**, not the sender. Challenging a spotless worker returns clean and contains nothing, while the principal directing it carries on.
+
+```bash
+attest delegation
+```
+
+```
+arm                contained    exposure   budget/1k      wasted       delay
+chain-aware            17/17       0.050        0.47        0/17         3.0
+chain-blind             0/16       0.945        2.56       92/92         n/a
+```
+
+Both arms are the same engine; the blind one simply never sees the chain, which is what every agent-identity system does today. It contains nothing and every one of its 92 checks is wasted on an agent that really was clean.
+
+**This is one specific hole, not a general improvement.** Where the acting agent is itself the compromised party, the two arms are identical by construction — the weakest link is the sender either way. The scenario is constructed to expose the gap.
+
+The `backflow` default of 0.5 came out of the ablation rather than taste. Below ~0.25 the principal never sinks past the delegate doing its dirty work, so every check lands on the delegate and containment collapses to zero:
+
+| backflow | contained | exposure | budget/1k | wasted |
+|---|---|---|---|---|
+| 0.00 | 0/70 | 0.923 | 2.48 | 100% |
+| 0.25 | 71/83 | 0.147 | 3.04 | 84% |
+| **0.50** | **82/82** | **0.064** | **0.57** | **0%** |
+| 1.00 | 93/93 | 0.029 | 0.65 | 0% |
+
 ## Where the risk score comes from
 
 `LogisticRiskScorer` ships **stated prior weights, not fitted ones** — cryptographic failures (bad signature, expired credential, unlogged envelope) weighted heavily, behavioural novelty (new peer, new intent, burst rate) weighted lightly. Every weight is a guess. The interface is the one a trained model will have, and `Calibrator` exists from the start so calibration is not retrofitted later.
@@ -139,7 +173,7 @@ Use `TrustParams.from_event_interval(seconds)`, or let `/feed/start` tune it.
 
 ## Status
 
-Early. The engine, metrics, benchmark, SAMACP adapter, service and console are built and tested (125 tests). Not yet built: a real verifier beyond credential revocation, and any evaluation against non-synthetic data. The second of those is the one that decides whether the thesis holds.
+Early. The engine, metrics, benchmark, delegation-chain trust, SAMACP adapter, service and console are built and tested (173 tests). Not yet built: a real verifier beyond credential revocation, and any evaluation against non-synthetic data. The second of those is the one that decides whether the thesis holds.
 
 ## Licence
 

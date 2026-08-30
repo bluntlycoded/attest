@@ -197,6 +197,30 @@ class TrustState:
             updated_at=at,
         )
 
+    def penalize(self, p: float, at: float, params: TrustParams) -> "TrustState":
+        """Fold in bad evidence only, without crediting the good half.
+
+        :meth:`observe` adds ``1 - p`` to the good counter as well as ``w * p``
+        to the bad one, which is right for evidence about the agent itself. It
+        is wrong for evidence delegated upward: a principal charged for a
+        delegate's misbehaviour would also be *credited* for the delegate's
+        good conduct on the same call, which is exactly the laundering route
+        upward propagation exists to close.
+
+        Args:
+            p: Probability mass to charge, already scaled by any propagation
+                weight.
+            at: Unix timestamp of the observation.
+        """
+        if not 0.0 <= p <= 1.0:
+            raise ValueError(f"p must lie in [0, 1], got {p}")
+        decay = self._decay_factor(at, params)
+        return TrustState(
+            r=decay * self.r,
+            s=decay * self.s + params.w * p,
+            updated_at=at,
+        )
+
     def decayed(self, at: float, params: TrustParams) -> "TrustState":
         """Apply forgetting without folding in new evidence.
 

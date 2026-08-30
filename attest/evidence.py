@@ -39,6 +39,9 @@ class Envelope:
             unexpired and unrevoked at emission time.
         audit_proof: Merkle inclusion proof reference, or None if the envelope
             was never logged.
+        on_behalf_of: Delegation chain above the sender - root principal first,
+            immediate delegator last. Empty when the agent acts only for
+            itself, in which case everything reduces to per-agent scoring.
     """
 
     sender: str
@@ -49,6 +52,7 @@ class Envelope:
     signature_valid: bool = True
     credential_valid: bool = True
     audit_proof: str | None = None
+    on_behalf_of: tuple[str, ...] = ()
 
 
 @dataclass

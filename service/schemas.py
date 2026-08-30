@@ -41,6 +41,10 @@ class EnvelopeIn(BaseModel):
     signature_valid: bool = True
     credential_valid: bool = True
     audit_proof: str | None = None
+    on_behalf_of: list[str] = Field(
+        default_factory=list,
+        description="Delegation chain above the sender, root principal first",
+    )
 
     def at(self) -> float:
         return self.timestamp if self.timestamp is not None else time.time()
@@ -54,6 +58,14 @@ class DecisionOut(BaseModel):
     action: Literal["observe", "verify"]
     reason: str
     enforced: bool
+    #: Trust of the whole delegation chain. Equal to ``trust`` for an agent
+    #: acting only for itself.
+    effective_trust: float | None = None
+    #: Who a verification is aimed at - the chain's weakest link, which is not
+    #: always the sender.
+    target: str | None = None
+    #: Delegation chain, root principal first, sender last.
+    chain: list[str] = Field(default_factory=list)
 
 
 class AgentOut(BaseModel):

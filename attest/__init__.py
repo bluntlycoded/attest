@@ -22,6 +22,7 @@ which is deliberate: the part of the system that acts on production traffic
 should not be something anyone has to take on faith.
 """
 
+from .delegation import ChainTrust, DelegationParams, effective_trust
 from .engine import AttestEngine, Decision, Verification, Verifier
 from .evidence import AgentProfile, Calibrator, Envelope, LogisticRiskScorer
 from .metrics import Metrics, StepRecord, bootstrap_ci, evaluate
@@ -37,8 +38,10 @@ __all__ = [
     "Action",
     "AttestEngine",
     "Budget",
+    "ChainTrust",
     "Calibrator",
     "Decision",
+    "DelegationParams",
     "Envelope",
     "InMemoryStore",
     "JsonFileStore",
@@ -54,6 +57,7 @@ __all__ = [
     "Verifier",
     "bootstrap_ci",
     "decide",
+    "effective_trust",
     "evaluate",
     "__version__",
 ]

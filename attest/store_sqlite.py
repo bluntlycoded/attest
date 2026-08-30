@@ -43,7 +43,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     trust     REAL NOT NULL,
     action    TEXT NOT NULL,
     reason    TEXT NOT NULL,
-    enforced  INTEGER NOT NULL DEFAULT 0
+    enforced  INTEGER NOT NULL DEFAULT 0,
+    effective_trust REAL,
+    target    TEXT,
+    chain     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS decisions_agent_idx ON decisions (agent_id, id DESC);
@@ -71,8 +74,28 @@ def _connect(path: str) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
     connection.executescript(_SCHEMA)
+    _migrate(connection)
     connection.commit()
     return connection
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created.
+
+    Delegation arrived after the original schema, and a database written by an
+    earlier version is otherwise perfectly usable - dropping it would throw
+    away real trust history to gain three nullable columns.
+    """
+    existing = {
+        row["name"] for row in connection.execute("PRAGMA table_info(decisions)")
+    }
+    for column, ddl in (
+        ("effective_trust", "REAL"),
+        ("target", "TEXT"),
+        ("chain", "TEXT"),
+    ):
+        if column not in existing:
+            connection.execute(f"ALTER TABLE decisions ADD COLUMN {column} {ddl}")
 
 
 class SqliteStore:
@@ -208,8 +231,9 @@ class SqliteDecisionLog:
             self._conn.execute(
                 """
                 INSERT INTO decisions
-                    (agent_id, timestamp, p, trust, action, reason, enforced)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (agent_id, timestamp, p, trust, action, reason, enforced,
+                     effective_trust, target, chain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.agent_id,
@@ -219,6 +243,11 @@ class SqliteDecisionLog:
                     decision.action.value,
                     decision.reason.value,
                     int(decision.enforced),
+                    decision.effective_trust,
+                    decision.target,
+                    # Stored as a delimited string rather than a join table:
+                    # chains are short and only ever read back whole.
+                    ">".join(decision.chain) if decision.chain else None,
                 ),
             )
             self._conn.commit()

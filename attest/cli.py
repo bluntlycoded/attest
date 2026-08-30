@@ -149,6 +149,54 @@ def _frontier(args: argparse.Namespace) -> int:
     return 0
 
 
+def _delegation(args: argparse.Namespace) -> int:
+    from .delegation_sim import DelegationScenario, compare
+
+    scenario = DelegationScenario(
+        orchestrators=args.orchestrators,
+        workers_each=args.workers,
+        steps=args.steps,
+        detector_quality=args.detector_quality,
+    )
+    results = compare(scenario, seed=args.seed)
+
+    print(
+        f"\n{scenario.orchestrators} orchestrators x {scenario.workers_each} workers"
+        f"  |  {scenario.steps} steps  |  seed {args.seed}"
+    )
+    print(
+        "A compromised orchestrator issues only ordinary-looking instructions;\n"
+        "the visibly hostile traffic comes from workers that are themselves clean.\n"
+        "Both arms are the same engine - the blind one just never sees the chain.\n"
+    )
+    print(
+        _row("arm", "contained", "exposure", "budget/1k", "wasted", "delay", width=12)
+    )
+    print("-" * 96)
+
+    for name, outcome in results.items():
+        delay = (
+            "n/a" if outcome.median_delay is None else f"{outcome.median_delay:.1f}"
+        )
+        print(
+            _row(
+                name,
+                f"{outcome.contained}/{outcome.episodes}",
+                f"{outcome.exposure:.3f}",
+                f"{outcome.budget_per_1k_steps:.2f}",
+                f"{outcome.wasted}/{outcome.verifications}",
+                delay,
+                width=12,
+            )
+        )
+
+    print(
+        "\nWasted means the check was aimed at an agent that really was clean,"
+        "\nso it returned clean and contained nothing.\n"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="attest",
@@ -190,6 +238,17 @@ def build_parser() -> argparse.ArgumentParser:
         "frontier", parents=[common], help="sweep budget against attacker exposure"
     )
     frontier.set_defaults(func=_frontier)
+
+    delegation = sub.add_parser(
+        "delegation",
+        help="compare chain-aware against chain-blind scheduling",
+    )
+    delegation.add_argument("--orchestrators", type=int, default=4)
+    delegation.add_argument("--workers", type=int, default=5)
+    delegation.add_argument("--steps", type=int, default=1500)
+    delegation.add_argument("--seed", type=int, default=0)
+    delegation.add_argument("--detector-quality", type=float, default=9.0)
+    delegation.set_defaults(func=_delegation)
 
     return parser
 

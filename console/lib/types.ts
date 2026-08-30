@@ -18,10 +18,17 @@ export interface Decision {
   agent_id: string;
   timestamp: number;
   p: number;
+  /** The sender's own trust. */
   trust: number;
   action: Action;
   reason: Reason;
   enforced: boolean;
+  /** Trust of the whole delegation chain; equals `trust` when undelegated. */
+  effective_trust: number | null;
+  /** Who a verification is aimed at - the chain's weakest link. */
+  target: string | null;
+  /** Delegation chain, root principal first, sender last. */
+  chain: string[];
 }
 
 export interface Agent {

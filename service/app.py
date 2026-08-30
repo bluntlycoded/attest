@@ -167,6 +167,9 @@ def _to_out(decision) -> DecisionOut:
         action=decision.action.value,
         reason=decision.reason.value,
         enforced=decision.enforced,
+        effective_trust=decision.effective_trust,
+        target=decision.target,
+        chain=list(decision.chain),
     )
 
 
@@ -186,6 +189,7 @@ async def observe(
         signature_valid=body.signature_valid,
         credential_valid=body.credential_valid,
         audit_proof=body.audit_proof,
+        on_behalf_of=tuple(body.on_behalf_of),
     )
     try:
         return _to_out(state.engine.observe(envelope))
@@ -273,6 +277,9 @@ async def decisions(
             action=r["action"],
             reason=r["reason"],
             enforced=bool(r["enforced"]),
+            effective_trust=r["effective_trust"],
+            target=r["target"],
+            chain=r["chain"].split(">") if r["chain"] else [],
         )
         for r in rows
     ]
