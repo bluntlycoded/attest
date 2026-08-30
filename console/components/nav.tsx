@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { usePolled } from "@/lib/api";
-import type { Health } from "@/lib/types";
+import type { Approval, Health, WhoAmI } from "@/lib/types";
 import { Badge } from "./ui";
 
 const LINKS = [
   { href: "/", label: "Fleet" },
+  { href: "/approvals", label: "Approvals" },
   { href: "/decisions", label: "Decisions" },
   { href: "/frontier", label: "Frontier" },
   { href: "/settings", label: "Settings" },
@@ -16,6 +17,10 @@ const LINKS = [
 export function Nav() {
   const pathname = usePathname();
   const { data: health, error } = usePolled<Health>("/health", 4000);
+  const { data: who } = usePolled<WhoAmI>("/whoami", 30000);
+  // Surfaced in the nav because a queue nobody looks at is the failure this
+  // whole design is trying to avoid.
+  const { data: waiting } = usePolled<Approval[]>("/approvals", 5000);
 
   return (
     <nav className="sticky top-0 z-10 border-b border-ink-700 bg-ink-900/95 backdrop-blur">
@@ -52,9 +57,24 @@ export function Nav() {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          {waiting && waiting.length > 0 && (
+            <Badge tone="warn" title="actions held for a person">
+              {waiting.length} waiting
+            </Badge>
+          )}
+          {who && (
+            <Badge
+              tone="neutral"
+              title={`key ${who.key_id} in tenant ${who.tenant_id}`}
+            >
+              {who.tenant_id} / {who.role}
+            </Badge>
+          )}
           {error ? (
             <Badge tone="bad" title={error}>
-              service offline
+              {error.includes("401") || error.toLowerCase().includes("bearer")
+                ? "not authenticated"
+                : "service offline"}
             </Badge>
           ) : health ? (
             <>

@@ -211,11 +211,22 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 export function ErrorNote({ message }: { message: string }) {
+  const unauthenticated =
+    message.toLowerCase().includes("bearer") || message.includes("401");
   return (
     <div className="rounded border border-rose-900 bg-rose-950/40 px-3 py-2 text-[12px] text-rose-300">
       {message}
       <div className="mt-1 text-[11px] text-rose-400/70">
-        Is the service running? <code>uvicorn service.app:app</code>
+        {unauthenticated ? (
+          <>
+            The service has no anonymous path. Set{" "}
+            <code>NEXT_PUBLIC_ATTEST_TOKEN</code> to an approver key.
+          </>
+        ) : (
+          <>
+            Is the service running? <code>uvicorn service.app:app</code>
+          </>
+        )}
       </div>
     </div>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api, usePolled } from "@/lib/api";
-import type { Config } from "@/lib/types";
+import type { Catalog, Config } from "@/lib/types";
 import { duration, num } from "@/lib/format";
 import { Button, ErrorNote, Field, NumberInput, Panel } from "@/components/ui";
 
@@ -14,6 +14,7 @@ import { Button, ErrorNote, Field, NumberInput, Panel } from "@/components/ui";
  */
 export default function SettingsPage() {
   const { data: config, error, refresh } = usePolled<Config>("/config", 5000);
+  const { data: catalog } = usePolled<Catalog>("/catalog", 10000);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -189,6 +190,53 @@ export default function SettingsPage() {
         </Button>
         {saved && <span className="text-[11px] text-emerald-400">Applied.</span>}
       </div>
+
+      {catalog && (
+        <Panel
+          title="Tool catalogue"
+          subtitle="What each tool is declared to do. This is the operator's word, never the agent's - a tool description arrives over the same channel as the request, and an agent able to call its own action read-only would. Anything not listed is treated as irreversible and sensitive, so an unknown tool escalates rather than sails through."
+        >
+          <table className="w-full text-left text-[12px]">
+            <thead>
+              <tr className="border-b border-ink-700 text-[10px] uppercase tracking-wider text-ink-400">
+                <th className="pb-2 pr-3 font-normal">Tool</th>
+                <th className="pb-2 pr-3 font-normal">Reversibility</th>
+                <th className="pb-2 pr-3 text-right font-normal">Magnitude</th>
+                <th className="pb-2 pr-3 font-normal">Sensitive</th>
+                <th className="pb-2 font-normal">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(catalog.tools).map(([name, risk]) => (
+                <tr key={name} className="border-b border-ink-850/70 last:border-0">
+                  <td className="py-2 pr-3 text-ink-200">{name}</td>
+                  <td className="py-2 pr-3">
+                    <span
+                      className={
+                        risk.reversibility === "irreversible" ||
+                        risk.reversibility === "unknown"
+                          ? "text-rose-400"
+                          : risk.reversibility === "recoverable"
+                            ? "text-amber-400"
+                            : "text-emerald-400"
+                      }
+                    >
+                      {risk.reversibility}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-right tnum text-ink-300">
+                    {num(risk.magnitude, 2)}
+                  </td>
+                  <td className="py-2 pr-3 text-ink-400">
+                    {risk.sensitive ? "yes" : "-"}
+                  </td>
+                  <td className="py-2 text-ink-400">{risk.description}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      )}
 
       {config && (
         <Panel title="In effect now">

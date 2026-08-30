@@ -122,3 +122,76 @@ export interface Health {
   feed_running: boolean;
   stream_subscribers: number;
 }
+
+// ---------------------------------------------------------------- approvals
+
+export type Tier = "auto" | "owner" | "authority";
+export type Verdict = "allow" | "hold" | "deny";
+
+export interface DecisionPacket {
+  agent_id: string;
+  target: string;
+  requested_at: number;
+  expires_at: number;
+  tool: string;
+  resource: string;
+  intent: string;
+  argument_digest: string;
+  trust: number;
+  effective_trust: number;
+  chain: string[];
+  reason: string;
+  tier: Tier;
+  risk_score: number;
+  reversibility: "reversible" | "recoverable" | "irreversible" | "unknown";
+  novelty: number;
+  /** Plain-language reasons this was escalated. */
+  drivers: string[];
+  tool_description: string;
+  recent: { at: number; tool: string; resource: string; allowed: boolean }[];
+}
+
+export interface Approval {
+  request_id: string;
+  agent_id: string;
+  target: string;
+  tier: Tier;
+  tool: string;
+  resource: string;
+  opened_at: number;
+  expires_at: number;
+  outcome: string | null;
+  approver: string | null;
+  /** Pre-rendered text form, for a channel that cannot show the structure. */
+  rendered: string;
+  packet: DecisionPacket;
+}
+
+/** Whether one reviewer still appears to be reading. */
+export interface ApproverStats {
+  approver: string;
+  decisions: number;
+  approval_rate: number;
+  median_latency: number;
+  latency_cv: number;
+  hollow_score: number;
+  hollow: boolean;
+}
+
+export interface ToolRisk {
+  reversibility: "reversible" | "recoverable" | "irreversible" | "unknown";
+  magnitude: number;
+  sensitive: boolean;
+  description: string;
+}
+
+export interface Catalog {
+  tools: Record<string, ToolRisk>;
+}
+
+export interface WhoAmI {
+  key_id: string;
+  tenant_id: string;
+  role: "ingest" | "approver" | "admin";
+  label: string;
+}
