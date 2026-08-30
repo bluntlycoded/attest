@@ -197,6 +197,46 @@ def _delegation(args: argparse.Namespace) -> int:
     return 0
 
 
+def _evaluate(args: argparse.Namespace) -> int:
+    from .datasets import lanl
+    from .datasets.run import evaluate_corpus
+
+    print(f"\nloading {args.dataset} (a full pass over the log; not quick)...")
+    try:
+        timelines = lanl.load(
+            args.auth,
+            args.redteam,
+            lanl.LanlConfig(
+                benign_entities=args.benign_entities,
+                benign_sample_rate=args.benign_sample_rate,
+                max_events_per_entity=args.max_events,
+                seed=args.seed,
+            ),
+            strict_labels=args.strict_labels,
+            progress=True,
+        )
+    except FileNotFoundError as exc:
+        print(f"\n{exc}\n")
+        return 1
+
+    report = evaluate_corpus(
+        timelines,
+        dataset=args.dataset,
+        theta_low=args.theta_low,
+        resamples=args.resamples,
+        budget_per_1k=args.budget,
+        seed=args.seed,
+    )
+
+    print()
+    print(report.summary())
+    print("\nlearned coefficients, largest first:")
+    for feature, weight in report.coefficients[:12]:
+        print(f"  {feature:<20} {weight:+.4f}")
+    print()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="attest",
@@ -249,6 +289,41 @@ def build_parser() -> argparse.ArgumentParser:
     delegation.add_argument("--seed", type=int, default=0)
     delegation.add_argument("--detector-quality", type=float, default=9.0)
     delegation.set_defaults(func=_delegation)
+
+    evaluate_cmd = sub.add_parser(
+        "evaluate",
+        help="run the full evaluation against a real labelled corpus",
+        description=(
+            "Fits the risk model on one set of entities, calibrates on a "
+            "second, and scores the scheduler on a third. Request the LANL "
+            "corpus from cyberdata@lanl.gov."
+        ),
+    )
+    evaluate_cmd.add_argument("--dataset", default="lanl", choices=["lanl"])
+    evaluate_cmd.add_argument(
+        "--auth", required=True, help="path to auth.txt.gz"
+    )
+    evaluate_cmd.add_argument(
+        "--redteam", required=True, help="path to redteam.txt.gz"
+    )
+    evaluate_cmd.add_argument("--benign-entities", type=int, default=400)
+    evaluate_cmd.add_argument(
+        "--benign-sample-rate",
+        type=float,
+        default=0.05,
+        help="chance a new benign account is sampled; use 1.0 on small files",
+    )
+    evaluate_cmd.add_argument("--max-events", type=int, default=4000)
+    evaluate_cmd.add_argument("--theta-low", type=float, default=0.5)
+    evaluate_cmd.add_argument("--budget", type=float, default=None)
+    evaluate_cmd.add_argument("--resamples", type=int, default=200)
+    evaluate_cmd.add_argument("--seed", type=int, default=0)
+    evaluate_cmd.add_argument(
+        "--strict-labels",
+        action="store_true",
+        help="label only literal red team events, not the whole window",
+    )
+    evaluate_cmd.set_defaults(func=_evaluate)
 
     return parser
 

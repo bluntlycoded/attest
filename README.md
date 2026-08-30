@@ -91,6 +91,30 @@ Two honest caveats the benchmark surfaces:
 - Under a hard token-bucket budget cap (`--budget`), rather than a tuned threshold, raw thresholding does *better* than the trust layer on this generator. The simulated detector is close to an oracle, and when scores are that clean there is little sub-certain evidence left for the trust layer to integrate. The advantage above is real but it lives in the threshold-tuning framing, not every framing.
 - **The trust calculus requires calibrated probabilities.** The recurrence treats `p` as an expected count of bad evidence. If a benign agent's scores average far above zero, `w` scales that into a steady-state trust below `θ_low`, and the policy fires on well-behaved agents and then disarms. `attest bench --detector-quality 1.5` shows this failure outright: containment collapses to 0.017. This is pinned by a test so it cannot quietly disappear.
 
+## Real-corpus evaluation
+
+Everything above is measured on sessions this project generated, which is the
+single biggest weakness in the whole argument. `attest evaluate` runs the same
+four policies and four metrics against a corpus somebody else collected and
+labelled:
+
+```bash
+attest evaluate --auth auth.txt.gz --redteam redteam.txt.gz
+```
+
+The target is LANL's *Comprehensive, Multi-Source Cyber-Security Events* (Kent, 2015) — 58 days of Windows authentication from a real enterprise network, 1.6 billion events across 12,425 accounts, with published red team ground truth. It is the closest public analogue: a real entity stream, real behaviour, labels assigned by someone with no stake in this result.
+
+The pipeline is built and tested end to end:
+
+- `datasets/lanl.py` streams `auth.txt.gz` (7.2 GB) and filters in one pass, never decompressing to disk
+- `learn.py` fits the perception stage — logistic regression, minibatch SGD, prior correction, temperature calibration, no dependencies
+- Splits are **entity-grouped and stratified**; coefficients, temperature and evaluation each see a disjoint set of accounts
+- Detection quality (ROC-AUC, PR-AUC, ECE) is reported next to the scheduling result, because a scheduler on a weak risk model looks bad for reasons that have nothing to do with scheduling
+
+**The number does not exist yet.** LANL moved the corpus behind a request to `cyberdata@lanl.gov`, so it has not been run on real data. What has been run is a fixture in exact LANL wire format, which proves the plumbing and nothing else — the model promptly found the fixture's tell (a giveaway `auth_type`, coefficient +9.4) and scored ROC-AUC 0.999, which is what a fixture does, not what a corpus does.
+
+A labelling decision worth knowing before reading any eventual result: the red team file marks *individual* events, but compromise is a state. An episode is taken as the interval from an account's first red team event to its last, with every event in between labelled compromised. That inflates the positive class relative to the raw file, and results move if you change it. `--strict-labels` marks only the literal events, for comparison.
+
 ## Delegation chains
 
 Scoring each agent alone misses the failure that matters most: a compromised orchestrator that never touches anything sensitive itself, and instead has five perfectly healthy workers do it. Its own messages look ordinary, because all it sends is instructions.
@@ -173,7 +197,7 @@ Use `TrustParams.from_event_interval(seconds)`, or let `/feed/start` tune it.
 
 ## Status
 
-Early. The engine, metrics, benchmark, delegation-chain trust, SAMACP adapter, service and console are built and tested (173 tests). Not yet built: a real verifier beyond credential revocation, and any evaluation against non-synthetic data. The second of those is the one that decides whether the thesis holds.
+Early. The engine, metrics, benchmark, delegation-chain trust, SAMACP adapter, real-corpus harness, service and console are built and tested (213 tests). Not yet built: a real verifier beyond credential revocation, and any evaluation against non-synthetic data. The second of those is the one that decides whether the thesis holds.
 
 ## Licence
 
