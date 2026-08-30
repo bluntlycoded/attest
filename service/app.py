@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from attest.approval import AdaptiveThresholds, RubberStampDetector
 from attest.tenancy import Principal, Role
 
 from attest.metrics import bootstrap_ci, evaluate
@@ -580,11 +581,21 @@ async def stop_feed(state: TenantContext = Depends(get_admin)) -> FeedOut:
 
 @app.post("/reset")
 async def reset(state: TenantContext = Depends(get_admin)) -> dict:
-    """Clear all agent state and decisions. Intended for demos."""
+    """Clear all state for this tenant. Intended for demos.
+
+    The approval queue, the packet builder's tool history and the
+    rubber-stamp record all have to go too. Clearing only agents and
+    decisions leaves approvals pointing at agents that no longer exist, and
+    an oversight table describing reviewers of traffic that has been erased.
+    """
     if state.feed is not None:
         await state.feed.stop()
         state.feed = None
     state.log.clear()
+    state.approvals.clear()
+    state.builder.forget()
+    state.engine.rubber_stamp = RubberStampDetector()
+    state.engine.thresholds = AdaptiveThresholds(state.engine.approval)
     return {"status": "cleared"}
 
 

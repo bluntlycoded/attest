@@ -158,6 +158,15 @@ class ApprovalQueue:
         self._pending.pop(request.request_id, None)
         self._history.append(request)
 
+    def clear(self) -> None:
+        """Drop every request, pending and settled.
+
+        Used when resetting a demo. Not something to call against real
+        traffic: settled requests are the audit record of who approved what.
+        """
+        self._pending.clear()
+        self._history.clear()
+
     @property
     def history(self) -> list[PendingApproval]:
         return list(self._history)

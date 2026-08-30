@@ -360,6 +360,11 @@ class PacketBuilder:
         if len(trail) > self.history:
             trail.pop(0)
 
+    def forget(self) -> None:
+        """Drop every agent's tool history and trail. Demo reset only."""
+        self._seen.clear()
+        self._recent.clear()
+
     def novelty(self, agent_id: str, tool: str) -> float:
         """How unfamiliar this tool is for this agent."""
         seen = self._seen.get(agent_id, set())

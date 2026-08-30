@@ -575,3 +575,19 @@ def test_a_query_token_works_only_on_the_sse_path(client):
 def test_a_query_token_is_ignored_on_ordinary_paths_over_http(anon):
     assert anon.get(f"/agents?token={BOOTSTRAP}").status_code == 401
     assert anon.get(f"/metrics?token={BOOTSTRAP}").status_code == 401
+
+
+def test_reset_clears_approvals_and_oversight_too(client):
+    """Otherwise a reset leaves approvals pointing at agents that no longer exist."""
+    _settle_gateway(client)
+    client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    )
+    assert client.get("/approvals").json()
+
+    client.post("/reset")
+
+    assert client.get("/approvals").json() == []
+    assert client.get("/approvers").json() == []
+    assert client.get("/agents").json() == []
