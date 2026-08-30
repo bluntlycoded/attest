@@ -103,9 +103,43 @@ Derived from the re-verification pipeline in *An Interpretable Sequence Model fo
 
 Reference parameters (`γ = 0.94`, `w = 2`, `θ_low = 0.5`, `θ_high = 0.65`, cooldown 8) come from that work. Configure `TrustParams.from_recovery_time()` from a stated policy requirement rather than picking a decay constant off a validation curve.
 
+## Running the service and console
+
+```bash
+pip install -e ".[dev]"
+uvicorn service.app:app --port 8317
+```
+
+```bash
+cd console && npm install && npm run dev
+```
+
+The console is at `http://localhost:3317`. Press **Start simulated feed** on the Fleet page — nothing else is needed, and in particular the SAMACP stack does not have to be running.
+
+Five pages: **Fleet** (every agent, least trusted first), **Agent detail** (trust trajectory with verification markers and the hysteresis band), **Decisions** (live SSE stream with a reason breakdown), **Frontier** (the budget–exposure sweep), and **Settings** (parameters set from a stated recovery requirement, not a raw decay constant).
+
+`/metrics` reports only operational counters. Exposure, containment and onset delay need ground truth no live deployment has, so they appear on the Frontier page — computed on generated sessions — and nowhere else.
+
+## Feeding it real traffic
+
+```bash
+pip install -e ".[samacp]"
+curl -X POST localhost:8317/ingest/samacp -d @envelope.json -H 'Content-Type: application/json'
+```
+
+The adapter verifies the Ed25519 signature against the sender's ANS-registered key, the credential's expiry and revocation, and the Merkle inclusion proof.
+
+**Unverifiable is not invalid.** If the ANS is unreachable we cannot resolve keys — but an ANS outage is not evidence any agent is compromised, and treating unknown as failed would drive the whole fleet's trust to zero at once and spend the entire budget on an infrastructure problem. Unknowns fail open and are counted in `/metrics`. Set `unknown_is_invalid=True` to reverse it.
+
+## One thing that will bite you
+
+`step_seconds` must track how often an agent actually emits. Steady-state evidence accumulates to roughly `1 / (1 - γ^(interval / step_seconds))`. Leave it at a wall-clock default while agents emit every 30 ms and that figure reaches several hundred — at which point no realistic compromise episode can bank enough bad evidence to overcome it, and **the trigger silently never fires**. There is no error; trust simply sits high forever.
+
+Use `TrustParams.from_event_interval(seconds)`, or let `/feed/start` tune it.
+
 ## Status
 
-Early. The engine, metrics and benchmark are real and tested (87 tests). Not yet built: a SAMACP transport adapter, a real verifier implementation, and any evaluation against non-synthetic data. Those are the next three things.
+Early. The engine, metrics, benchmark, SAMACP adapter, service and console are built and tested (125 tests). Not yet built: a real verifier beyond credential revocation, and any evaluation against non-synthetic data. The second of those is the one that decides whether the thesis holds.
 
 ## Licence
 

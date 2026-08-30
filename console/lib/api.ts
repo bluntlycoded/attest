@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Decision } from "./types";
 
 export const API =
-  process.env.NEXT_PUBLIC_ATTEST_API ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_ATTEST_API ?? "http://localhost:8317";
 
 export class ApiError extends Error {
   constructor(

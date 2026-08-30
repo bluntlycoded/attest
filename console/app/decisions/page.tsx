@@ -12,21 +12,22 @@ type Filter = "all" | "verify" | "suppressed";
 export default function DecisionsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const { decisions, connected } = useDecisionStream(400);
-  const { data: recent, error } = usePolled<Decision[]>(
-    "/decisions?limit=200",
-    3000,
-  );
+
+  // Filtering happens server-side. Narrowing the live buffer instead would only
+  // ever surface events since this page connected, which for something as rare
+  // as a verification means showing one row next to a counter reading 34.
+  const query =
+    filter === "verify"
+      ? "/decisions?limit=200&action=verify"
+      : filter === "suppressed"
+        ? "/decisions?limit=200&reason=cooldown,budget_exhausted"
+        : "/decisions?limit=200";
+  const { data: recent, error } = usePolled<Decision[]>(query, 3000);
   const { data: metrics } = usePolled<Metrics>("/metrics", 3000);
 
-  // Prefer the live stream once it has anything; fall back to polling so the
-  // page is useful immediately on load and after a stream drop.
-  const rows = decisions.length ? decisions : (recent ?? []);
-  const filtered = rows.filter((d) => {
-    if (filter === "verify") return d.action === "verify";
-    if (filter === "suppressed")
-      return d.reason === "cooldown" || d.reason === "budget_exhausted";
-    return true;
-  });
+  // On the unfiltered view prefer the live stream, which updates instantly.
+  const filtered =
+    filter === "all" && decisions.length ? decisions : (recent ?? []);
 
   const suppressed =
     (metrics?.reasons.cooldown ?? 0) + (metrics?.reasons.budget_exhausted ?? 0);
@@ -121,9 +122,9 @@ export default function DecisionsPage() {
       >
         {!filtered.length ? (
           <Empty>
-            {rows.length
-              ? "No decisions match this filter."
-              : "No decisions yet. Start the feed from the Fleet page."}
+            {filter === "all"
+              ? "No decisions yet. Start the feed from the Fleet page."
+              : "Nothing has matched this filter yet."}
           </Empty>
         ) : (
           <div className="max-h-[560px] overflow-y-auto">

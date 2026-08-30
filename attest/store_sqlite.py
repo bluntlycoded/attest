@@ -229,8 +229,16 @@ class SqliteDecisionLog:
         limit: int = 100,
         agent_id: str | None = None,
         action: str | None = None,
+        reasons: list[str] | None = None,
     ) -> list[dict]:
-        """Most recent decisions first."""
+        """Most recent decisions first.
+
+        Args:
+            reasons: Restrict to these decision reasons. Filtering here rather
+                than in the caller matters: a client filtering its own live
+                buffer only ever sees decisions since it connected, which for
+                rare events like verifications is badly misleading.
+        """
         clauses, params = [], []
         if agent_id:
             clauses.append("agent_id = ?")
@@ -238,6 +246,9 @@ class SqliteDecisionLog:
         if action:
             clauses.append("action = ?")
             params.append(action)
+        if reasons:
+            clauses.append(f"reason IN ({','.join('?' * len(reasons))})")
+            params.extend(reasons)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
 

@@ -181,3 +181,27 @@ def test_ingest_rejects_a_non_object_payload(client):
 
 def test_ingest_rejects_an_envelope_without_a_sender(client):
     assert client.post("/ingest/samacp", json={"to": "b"}).status_code == 422
+
+
+def test_decisions_can_be_filtered_by_reason(client):
+    """Server-side filtering, because a client can only filter what it saw live."""
+    _send(client, 120)
+    _send(
+        client,
+        60,
+        start=120,
+        recipient="tool-exfil",
+        action="bulk_export",
+        signature_valid=False,
+        credential_valid=False,
+    )
+
+    below = client.get("/decisions", params={"reason": "below_threshold"}).json()
+    assert below and all(d["reason"] == "below_threshold" for d in below)
+
+    suppressed = client.get(
+        "/decisions", params={"reason": "cooldown,budget_exhausted"}
+    ).json()
+    assert all(d["reason"] in {"cooldown", "budget_exhausted"} for d in suppressed)
+
+    assert client.get("/decisions", params={"reason": "nonsense"}).json() == []

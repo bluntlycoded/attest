@@ -54,7 +54,7 @@ DB_PATH = os.environ.get("ATTEST_DB", "attest.db")
 ANS_URL = os.environ.get("ATTEST_ANS_URL", "http://localhost:5000")
 # The console's dev origin. Override for a deployed front end.
 CORS_ORIGINS = os.environ.get(
-    "ATTEST_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    "ATTEST_CORS_ORIGINS", "http://localhost:3317,http://127.0.0.1:3317"
 ).split(",")
 
 _state: ServiceState | None = None
@@ -255,9 +255,15 @@ async def decisions(
     limit: int = Query(100, ge=1, le=1000),
     agent_id: str | None = None,
     action: str | None = Query(None, pattern="^(observe|verify)$"),
+    reason: str | None = Query(
+        None, description="Comma-separated decision reasons to include"
+    ),
     state: ServiceState = Depends(get_state),
 ) -> list[DecisionOut]:
-    rows = state.log.recent(limit=limit, agent_id=agent_id, action=action)
+    reasons = [r.strip() for r in reason.split(",") if r.strip()] if reason else None
+    rows = state.log.recent(
+        limit=limit, agent_id=agent_id, action=action, reasons=reasons
+    )
     return [
         DecisionOut(
             agent_id=r["agent_id"],
