@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state written by JsonFileStore
+*.state.json
+state.json
+
+# Secrets - never commit keys or credentials
+*.pem
+*.key
+*.hex
+*.enc
+credentials.json
+service-account*.json
+.env
+.env.*
+
+# OS
+.DS_Store
