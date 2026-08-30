@@ -10,6 +10,9 @@ import asyncio
 from dataclasses import dataclass
 
 from attest import AttestEngine, Budget, Decision, PolicyParams, TrustParams
+from attest.gateway import AttestGateway
+from attest.packet import PacketBuilder, Reversibility, ToolCatalog, ToolRisk
+from attest.queue import ApprovalQueue
 from attest.adapters import AnsClient, SamacpAdapter
 from attest.store_sqlite import SqliteDecisionLog, SqliteStore
 
@@ -107,6 +110,16 @@ class ServiceState:
         self.feed = None  # set by service.feed.SimulatedFeed
         self.engine = self._build_engine()
 
+        # The gateway holds the approval queue and the tool catalogue, so both
+        # survive a reconfiguration - pending approvals must not vanish
+        # because someone changed a threshold.
+        self.catalog = _starter_catalog()
+        self.builder = PacketBuilder(catalog=self.catalog)
+        self.approvals = ApprovalQueue()
+        self.gateway = AttestGateway(
+            engine=self.engine, builder=self.builder, queue=self.approvals
+        )
+
     def _build_engine(self) -> AttestEngine:
         s = self.settings
         budget = (
@@ -153,6 +166,11 @@ class ServiceState:
             if value is not None and hasattr(self.settings, key):
                 setattr(self.settings, key, value)
         self.engine = self._build_engine()
+        # Re-point the gateway, or it keeps deciding against the engine that
+        # was just replaced - approvals would resolve into state nothing reads,
+        # and the two would drift apart silently.
+        if getattr(self, "gateway", None) is not None:
+            self.gateway.engine = self.engine
 
     def _on_decision(self, decision: Decision) -> None:
         self.log.append(decision)
@@ -179,3 +197,65 @@ class ServiceState:
 
     def close(self) -> None:
         self.store.close()
+
+
+def _starter_catalog() -> ToolCatalog:
+    """A few tools declared so a fresh install does nothing surprising.
+
+    Everything not listed is treated as irreversible and sensitive, which is
+    the safe default but also means an unconfigured gateway holds every call.
+    These entries exist so the demo is usable; a real deployment replaces them.
+    """
+    return (
+        ToolCatalog()
+        .declare(
+            "search",
+            ToolRisk(
+                reversibility=Reversibility.REVERSIBLE,
+                magnitude=0.05,
+                description="Read-only search over documentation.",
+            ),
+        )
+        .declare(
+            "read_file",
+            ToolRisk(
+                reversibility=Reversibility.REVERSIBLE,
+                magnitude=0.1,
+                description="Reads a file the agent already has access to.",
+            ),
+        )
+        .declare(
+            "draft_message",
+            ToolRisk(
+                reversibility=Reversibility.RECOVERABLE,
+                magnitude=0.25,
+                description="Writes a draft. Nothing is sent.",
+            ),
+        )
+        .declare(
+            "send_message",
+            ToolRisk(
+                reversibility=Reversibility.IRREVERSIBLE,
+                magnitude=0.6,
+                description="Sends a message to an external recipient.",
+            ),
+        )
+        .declare(
+            "bulk_export",
+            ToolRisk(
+                reversibility=Reversibility.IRREVERSIBLE,
+                magnitude=0.9,
+                sensitive=True,
+                description="Exports records to an external destination.",
+            ),
+        )
+        .declare(
+            "wire_transfer",
+            ToolRisk(
+                reversibility=Reversibility.IRREVERSIBLE,
+                magnitude=1.0,
+                sensitive=True,
+                description="Moves money out of the operating account.",
+            ),
+        )
+    )

@@ -39,6 +39,7 @@ from .packet import (
     ToolCatalog,
     ToolRisk,
 )
+from .gateway import AttestGateway, GatewayDecision, ToolCall, Verdict
 from .queue import ApprovalQueue, PendingApproval
 from .engine import AttestEngine, Decision, Verification, Verifier
 from .evidence import AgentProfile, Calibrator, Envelope, LogisticRiskScorer
@@ -51,6 +52,10 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AgentProfile",
+    "Verdict",
+    "ToolCall",
+    "GatewayDecision",
+    "AttestGateway",
     "ToolRisk",
     "ToolCatalog",
     "Tier",

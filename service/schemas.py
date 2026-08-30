@@ -211,3 +211,88 @@ class FeedOut(BaseModel):
     steps_per_second: float
     emitted: int
     compromised_now: list[str]
+
+
+# ------------------------------------------------------------------- gateway
+
+
+class ToolRiskIn(BaseModel):
+    """Operator declaration of what a tool can do."""
+
+    reversibility: Literal[
+        "reversible", "recoverable", "irreversible", "unknown"
+    ] = "unknown"
+    magnitude: float = Field(1.0, ge=0.0, le=1.0)
+    sensitive: bool = False
+    description: str = ""
+
+
+class CatalogOut(BaseModel):
+    tools: dict[str, ToolRiskIn]
+
+
+class ToolCallIn(BaseModel):
+    """An intercepted tool call.
+
+    ``agent_id`` is whoever the gateway authenticated. It is never read from a
+    request payload, because a call that could name its own caller would let
+    any agent act as any other.
+    """
+
+    agent_id: str = Field(..., min_length=1)
+    tool: str = Field(..., min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    resource: str = ""
+    intent: str = ""
+    timestamp: float | None = None
+    authenticated: bool = True
+    credential_valid: bool = True
+    logged: bool = True
+    on_behalf_of: list[str] = Field(default_factory=list)
+
+    def at(self) -> float:
+        return self.timestamp if self.timestamp is not None else time.time()
+
+
+class VerdictOut(BaseModel):
+    verdict: Literal["allow", "hold", "deny"]
+    explain: str
+    tier: Literal["auto", "owner", "authority"]
+    request_id: str | None = None
+    trust: float
+    effective_trust: float
+    target: str
+    packet: dict[str, Any] | None = None
+
+
+class ApprovalOut(BaseModel):
+    request_id: str
+    agent_id: str
+    target: str
+    tier: Literal["auto", "owner", "authority"]
+    tool: str
+    resource: str
+    opened_at: float
+    expires_at: float
+    outcome: str | None = None
+    approver: str | None = None
+    rendered: str
+    packet: dict[str, Any]
+
+
+class DecideIn(BaseModel):
+    approver: str = Field(..., min_length=1)
+    outcome: Literal["approved", "rejected"]
+    at: float | None = None
+
+
+class ApproverOut(BaseModel):
+    """Whether one reviewer still appears to be reading."""
+
+    approver: str
+    decisions: int
+    approval_rate: float
+    median_latency: float
+    latency_cv: float
+    hollow_score: float
+    hollow: bool

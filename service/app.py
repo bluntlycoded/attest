@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -34,6 +35,13 @@ from attest.simulate import (
 from .feed import FeedConfig, SimulatedFeed
 from .schemas import (
     AgentOut,
+    ApprovalOut,
+    ApproverOut,
+    CatalogOut,
+    DecideIn,
+    ToolCallIn,
+    ToolRiskIn,
+    VerdictOut,
     BenchmarkIn,
     BenchmarkOut,
     ConfigIn,
@@ -497,3 +505,192 @@ async def reset(state: ServiceState = Depends(get_state)) -> dict:
         state.feed = None
     state.log.clear()
     return {"status": "cleared"}
+
+
+# -------------------------------------------------------------------- gateway
+
+
+def _verdict_out(result) -> VerdictOut:
+    trust = (
+        result.decision.effective_trust
+        if result.decision.effective_trust is not None
+        else result.decision.trust
+    )
+    return VerdictOut(
+        verdict=result.verdict.value,
+        explain=result.explain,
+        tier=result.tier.value,
+        request_id=result.request_id,
+        trust=result.decision.trust,
+        effective_trust=trust,
+        target=result.decision.verification_target,
+        packet=result.packet.to_dict() if result.packet else None,
+    )
+
+
+@app.get("/catalog", response_model=CatalogOut)
+async def get_catalog(state: ServiceState = Depends(get_state)) -> CatalogOut:
+    """What each tool is declared to do. The operator owns this, not the agent."""
+    return CatalogOut(
+        tools={
+            name: ToolRiskIn(
+                reversibility=risk.reversibility.value,
+                magnitude=risk.magnitude,
+                sensitive=risk.sensitive,
+                description=risk.description,
+            )
+            for name, risk in state.catalog.tools.items()
+        }
+    )
+
+
+@app.put("/catalog/{tool}", response_model=CatalogOut)
+async def declare_tool(
+    tool: str, body: ToolRiskIn, state: ServiceState = Depends(get_state)
+) -> CatalogOut:
+    """Declare a tool's risk properties."""
+    from attest.packet import Reversibility, ToolRisk
+
+    state.catalog.declare(
+        tool,
+        ToolRisk(
+            reversibility=Reversibility(body.reversibility),
+            magnitude=body.magnitude,
+            sensitive=body.sensitive,
+            description=body.description,
+        ),
+    )
+    return await get_catalog(state)
+
+
+@app.post("/gateway/evaluate", response_model=VerdictOut)
+async def evaluate_call(
+    body: ToolCallIn, state: ServiceState = Depends(get_state)
+) -> VerdictOut:
+    """Judge one intercepted tool call: allow, hold for a person, or deny."""
+    from attest.gateway import ToolCall
+
+    call = ToolCall(
+        agent_id=body.agent_id,
+        tool=body.tool,
+        arguments=body.arguments,
+        resource=body.resource,
+        intent=body.intent,
+        timestamp=body.at(),
+        authenticated=body.authenticated,
+        credential_valid=body.credential_valid,
+        logged=body.logged,
+        on_behalf_of=tuple(body.on_behalf_of),
+    )
+    try:
+        return _verdict_out(state.gateway.evaluate(call))
+    except ValueError as exc:
+        # An out-of-order timestamp is the caller's clock going backwards, not
+        # a server fault. Evidence has to arrive in order or the recurrence is
+        # meaningless, so say so plainly rather than returning a 500.
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/gateway/mcp", response_model=VerdictOut)
+async def evaluate_mcp(
+    request: Request,
+    agent_id: str = Query(..., min_length=1),
+    state: ServiceState = Depends(get_state),
+) -> VerdictOut:
+    """Judge a raw MCP ``tools/call`` request.
+
+    ``agent_id`` is a query parameter rather than a payload field on purpose:
+    identity must come from whatever the gateway authenticated. A request that
+    could name its own caller would let any agent act as any other.
+    """
+    from attest.gateway import from_mcp_request
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "expected a JSON-RPC object")
+    call = from_mcp_request(payload, agent_id=agent_id, timestamp=time.time())
+    try:
+        return _verdict_out(state.gateway.evaluate(call))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _approval_out(request) -> ApprovalOut:
+    return ApprovalOut(
+        request_id=request.request_id,
+        agent_id=request.packet.agent_id,
+        target=request.packet.target,
+        tier=request.tier.value,
+        tool=request.packet.tool,
+        resource=request.packet.resource,
+        opened_at=request.opened_at,
+        expires_at=request.expires_at,
+        outcome=request.outcome.value if request.outcome else None,
+        approver=request.approver,
+        rendered=request.packet.render(),
+        packet=request.packet.to_dict(),
+    )
+
+
+@app.get("/approvals", response_model=list[ApprovalOut])
+async def list_approvals(
+    tier: str | None = Query(None, pattern="^(owner|authority)$"),
+    state: ServiceState = Depends(get_state),
+) -> list[ApprovalOut]:
+    """Requests waiting on a person, oldest first.
+
+    Expiry is not applied here. A request past its deadline is still pending
+    until something retires it, and hiding it implicitly would mean the queue
+    looked empty while held calls sat unresolved. ``POST /approvals/sweep``
+    is what turns those into denials; ``expires_at`` lets a caller show which
+    are overdue.
+    """
+    from attest.packet import Tier
+
+    wanted = Tier(tier) if tier else None
+    return [_approval_out(r) for r in state.approvals.pending(tier=wanted)]
+
+
+@app.get("/approvals/{request_id}", response_model=ApprovalOut)
+async def get_approval(
+    request_id: str, state: ServiceState = Depends(get_state)
+) -> ApprovalOut:
+    request = state.approvals.get(request_id)
+    if request is None:
+        raise HTTPException(404, f"unknown approval request {request_id!r}")
+    return _approval_out(request)
+
+
+@app.post("/approvals/{request_id}/decide", response_model=ApprovalOut)
+async def decide_approval(
+    request_id: str, body: DecideIn, state: ServiceState = Depends(get_state)
+) -> ApprovalOut:
+    """Record a reviewer's answer and release or refuse the held call."""
+    from attest.approval import Outcome
+
+    at = body.at if body.at is not None else time.time()
+    try:
+        state.gateway.decide(request_id, body.approver, Outcome(body.outcome), at)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _approval_out(state.approvals.get(request_id))
+
+
+@app.post("/approvals/sweep")
+async def sweep_approvals(state: ServiceState = Depends(get_state)) -> dict:
+    """Age out unanswered holds. Every one becomes a denial, never a release."""
+    expired = state.gateway.sweep(time.time())
+    return {"expired": expired, "counts": state.approvals.counts()}
+
+
+@app.get("/approvers", response_model=list[ApproverOut])
+async def approvers(state: ServiceState = Depends(get_state)) -> list[ApproverOut]:
+    """Whether each reviewer still appears to be reading.
+
+    A hollow gate looks identical to a healthy one from the outside - the
+    approvals still arrive and the audit log still fills. This is the only
+    place that difference shows up.
+    """
+    return [ApproverOut(**vars(s)) for s in state.engine.rubber_stamp.stats()]

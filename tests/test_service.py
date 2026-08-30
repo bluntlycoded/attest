@@ -205,3 +205,167 @@ def test_decisions_can_be_filtered_by_reason(client):
     assert all(d["reason"] in {"cooldown", "budget_exhausted"} for d in suppressed)
 
     assert client.get("/decisions", params={"reason": "nonsense"}).json() == []
+
+
+# -------------------------------------------------------------------- gateway
+
+
+def _settle_gateway(client, n=60, agent="agent-7"):
+    for i in range(n):
+        client.post(
+            "/gateway/evaluate",
+            json={"agent_id": agent, "tool": "search", "timestamp": float(i)},
+        )
+
+
+def test_catalog_is_readable_and_declarable(client):
+    assert "wire_transfer" in client.get("/catalog").json()["tools"]
+    body = client.put(
+        "/catalog/custom_tool",
+        json={"reversibility": "reversible", "magnitude": 0.1, "description": "safe"},
+    ).json()
+    assert body["tools"]["custom_tool"]["magnitude"] == 0.1
+
+
+def test_a_routine_call_is_allowed(client):
+    _settle_gateway(client)
+    body = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "search", "timestamp": 100.0},
+    ).json()
+    assert body["verdict"] == "allow"
+    assert body["tier"] == "auto"
+
+
+def test_a_consequential_call_is_held_with_a_packet(client):
+    _settle_gateway(client)
+    body = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    ).json()
+
+    assert body["verdict"] == "hold"
+    assert body["request_id"]
+    assert body["packet"]["reversibility"] == "irreversible"
+
+
+def test_a_held_call_appears_in_the_queue_and_can_be_answered(client):
+    _settle_gateway(client)
+    held = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    ).json()
+
+    pending = client.get("/approvals").json()
+    assert [p["request_id"] for p in pending] == [held["request_id"]]
+    assert "wire_transfer" in pending[0]["rendered"]
+
+    decided = client.post(
+        f"/approvals/{held['request_id']}/decide",
+        json={"approver": "alice", "outcome": "approved", "at": 130.0},
+    ).json()
+    assert decided["outcome"] == "approved"
+    assert client.get("/approvals").json() == []
+
+
+def test_answering_twice_is_a_conflict(client):
+    _settle_gateway(client)
+    held = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    ).json()
+    body = {"approver": "alice", "outcome": "approved", "at": 130.0}
+    assert client.post(f"/approvals/{held['request_id']}/decide", json=body).status_code == 200
+    assert client.post(f"/approvals/{held['request_id']}/decide", json=body).status_code == 409
+
+
+def test_answering_an_unknown_request_is_a_404(client):
+    assert (
+        client.post(
+            "/approvals/apr-999999/decide",
+            json={"approver": "alice", "outcome": "approved"},
+        ).status_code
+        == 404
+    )
+    assert client.get("/approvals/apr-999999").status_code == 404
+
+
+def test_an_mcp_request_is_judged_and_cannot_name_its_own_caller(client):
+    _settle_gateway(client)
+    body = client.post(
+        "/gateway/mcp?agent_id=agent-7",
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": {"agent_id": "admin", "target": "acct-9"},
+            },
+        },
+    ).json()
+
+    assert body["verdict"] == "hold"
+    assert body["packet"]["agent_id"] == "agent-7"
+
+
+def test_mcp_endpoint_rejects_a_non_object_payload(client):
+    assert client.post("/gateway/mcp?agent_id=a", json=[1, 2]).status_code == 422
+
+
+def test_sweeping_expires_holds_into_denials(client):
+    _settle_gateway(client)
+    client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    )
+    swept = client.post("/approvals/sweep").json()
+    assert swept["expired"]
+    assert swept["counts"]["timeout"] >= 1
+
+
+def test_approver_stats_are_reported(client):
+    _settle_gateway(client)
+    for i in range(25):
+        held = client.post(
+            "/gateway/evaluate",
+            json={
+                "agent_id": "agent-7",
+                "tool": "wire_transfer",
+                "timestamp": 100.0 + i * 20,
+            },
+        ).json()
+        if held.get("request_id"):
+            client.post(
+                f"/approvals/{held['request_id']}/decide",
+                json={
+                    "approver": "clicker",
+                    "outcome": "approved",
+                    "at": 101.0 + i * 20,
+                },
+            )
+
+    stats = client.get("/approvers").json()
+    assert stats and stats[0]["approver"] == "clicker"
+
+
+def test_an_out_of_order_timestamp_is_a_client_error_not_a_crash(client):
+    """Evidence has to arrive in order; say so rather than returning a 500."""
+    _settle_gateway(client)
+    response = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "search", "timestamp": 1.0},
+    )
+    assert response.status_code == 422
+    assert "must be supplied in order" in response.text
+
+
+def test_an_overdue_request_is_still_pending_until_swept(client):
+    """Hiding it would make the queue look empty while a call sat held."""
+    _settle_gateway(client)
+    client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    )
+    assert len(client.get("/approvals").json()) == 1
+    client.post("/approvals/sweep")
+    assert client.get("/approvals").json() == []
