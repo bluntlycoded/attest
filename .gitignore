@@ -34,3 +34,8 @@ service-account*.json
 
 # OS
 .DS_Store
+
+# SQLite state
+*.db
+*.db-wal
+*.db-shm

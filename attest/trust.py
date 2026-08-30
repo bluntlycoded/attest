@@ -72,6 +72,33 @@ class TrustParams:
             raise ValueError(f"step_seconds must be positive, got {self.step_seconds}")
 
     @classmethod
+    def from_event_interval(
+        cls,
+        seconds: float,
+        *,
+        gamma: float = 0.94,
+        w: float = 2.0,
+    ) -> "TrustParams":
+        """Build parameters from an agent's typical gap between messages.
+
+        ``step_seconds`` has to track the rate an agent actually emits at, and
+        getting this wrong is the most common way to make the trust layer look
+        broken. Steady-state evidence accumulates to roughly
+        ``1 / (1 - gamma ** (interval / step_seconds))``: set ``step_seconds``
+        far above the real interval and that figure explodes, so a compromise
+        episode can never accumulate enough bad evidence to overcome the good
+        evidence already banked, and the trigger never fires.
+
+        As a rule, ``step_seconds`` should be about one inter-arrival gap.
+
+        Args:
+            seconds: Typical gap between consecutive messages from one agent.
+        """
+        if seconds <= 0.0:
+            raise ValueError(f"seconds must be positive, got {seconds}")
+        return cls(gamma=gamma, w=w, step_seconds=seconds)
+
+    @classmethod
     def from_recovery_time(
         cls,
         recovery_seconds: float,

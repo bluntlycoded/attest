@@ -29,13 +29,31 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# Cryptographic verification of real SAMACP envelopes.
+samacp = [
+    "pynacl>=1.5",
+    "pyjwt>=2.8",
+    "cryptography>=41",
+    "pyld>=2.0",
+    "requests>=2.31",
+]
+# The HTTP service the console talks to.
+service = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "attest[samacp]",
+]
+dev = [
+    "pytest>=7.0",
+    "httpx>=0.27",
+    "attest[samacp,service]",
+]
 
 [project.scripts]
 attest = "attest.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["attest*"]
+include = ["attest*", "service*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
