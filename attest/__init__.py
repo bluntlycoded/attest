@@ -30,6 +30,16 @@ from .approval import (
     RubberStampDetector,
 )
 from .delegation import ChainTrust, DelegationParams, effective_trust
+from .packet import (
+    ActionRisk,
+    DecisionPacket,
+    PacketBuilder,
+    Reversibility,
+    Tier,
+    ToolCatalog,
+    ToolRisk,
+)
+from .queue import ApprovalQueue, PendingApproval
 from .engine import AttestEngine, Decision, Verification, Verifier
 from .evidence import AgentProfile, Calibrator, Envelope, LogisticRiskScorer
 from .metrics import Metrics, StepRecord, bootstrap_ci, evaluate
@@ -41,6 +51,15 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AgentProfile",
+    "ToolRisk",
+    "ToolCatalog",
+    "Tier",
+    "Reversibility",
+    "PendingApproval",
+    "PacketBuilder",
+    "DecisionPacket",
+    "ApprovalQueue",
+    "ActionRisk",
     "RubberStampDetector",
     "Outcome",
     "ApprovalRecord",

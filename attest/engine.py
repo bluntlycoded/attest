@@ -255,6 +255,43 @@ class AttestEngine:
             )
         return state
 
+    def resolve(
+        self,
+        agent_id: str,
+        outcome: Outcome,
+        at: float,
+        *,
+        approver: str | None = None,
+        latency_seconds: float | None = None,
+    ) -> float:
+        """Apply an approval answer that arrived after the fact.
+
+        A reviewer cannot answer inside the request that triggered them, so the
+        loop has to be closable out of band. This is the entry point an
+        approval queue calls once a person has actually decided.
+
+        Returns:
+            The agent's trust after the answer was applied.
+        """
+        record = self.store.get(agent_id)
+        # Clamp: an answer necessarily arrives after the request, but the
+        # agent may have kept working in between and moved its own clock on.
+        when = max(at, record.trust.updated_at or at)
+        record.trust = self._apply_outcome(
+            Verification(
+                agent_id=agent_id,
+                timestamp=when,
+                compromised=outcome is Outcome.REJECTED,
+                outcome=outcome,
+                approver=approver,
+                latency_seconds=latency_seconds,
+            ),
+            record.trust,
+            when,
+        )
+        self.store.put(record)
+        return record.trust.score
+
     def observe(self, env: Envelope) -> Decision:
         """Process one envelope and return the resulting decision.
 
