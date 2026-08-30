@@ -1,7 +1,14 @@
-"""Service-wide state: the engine, its store, and the live decision fan-out.
+"""Service state: one context per tenant, over one database.
 
-Held as a single object rather than module globals so tests can build an
-isolated instance against an in-memory database.
+Isolation is structural rather than procedural. Each tenant gets its own
+engine, gateway, approval queue and tool catalogue, over a store scoped to that
+tenant. Nothing filters by tenant at the call site, because a filter can be
+forgotten and a scoped store has nothing else it could return.
+
+Behavioural profiles, threshold drift and rubber-stamp statistics all live on
+the engine, so they are per tenant for free. That matters more than it looks:
+approval latencies are the raw material of the rubber-stamp detector, and
+pooling them across tenants would let one customer's reviewers mask another's.
 """
 
 from __future__ import annotations
@@ -10,13 +17,14 @@ import asyncio
 from dataclasses import dataclass
 
 from attest import AttestEngine, Budget, Decision, PolicyParams, TrustParams
+from attest.adapters import AnsClient, SamacpAdapter
 from attest.gateway import AttestGateway
 from attest.packet import PacketBuilder, Reversibility, ToolCatalog, ToolRisk
 from attest.queue import ApprovalQueue
-from attest.adapters import AnsClient, SamacpAdapter
 from attest.store_sqlite import SqliteDecisionLog, SqliteStore
+from attest.tenancy import KeyStore
 
-__all__ = ["ServiceState", "Verifiers"]
+__all__ = ["ServiceState", "TenantContext", "Verifiers"]
 
 # Bound on the per-subscriber queue. A console that stops reading is dropped
 # from rather than allowed to grow without limit.
@@ -77,7 +85,7 @@ class Verifiers:
 
 @dataclass
 class _Settings:
-    """Mutable copy of the engine configuration, so it can be reported back."""
+    """Mutable copy of one tenant's engine configuration."""
 
     gamma: float = 0.94
     w: float = 2.0
@@ -90,19 +98,18 @@ class _Settings:
     warmup_events: int = 50
 
 
-class ServiceState:
-    """Everything the API handlers need.
+class TenantContext:
+    """Everything one tenant owns.
 
-    Args:
-        db_path: SQLite file, or ``":memory:"`` for tests.
-        ans_url: Agent Name Service base URL used by the SAMACP adapter.
+    Deliberately exposes the same surface the single-tenant service used, so
+    the handlers did not have to learn about tenancy - they receive a context
+    that can only see one tenant's data.
     """
 
-    def __init__(
-        self, db_path: str = "attest.db", ans_url: str = "http://localhost:5000"
-    ) -> None:
-        self.store = SqliteStore(db_path)
-        self.log = SqliteDecisionLog(self.store)
+    def __init__(self, tenant_id: str, store: SqliteStore, ans_url: str) -> None:
+        self.tenant_id = tenant_id
+        self.store = store
+        self.log = SqliteDecisionLog(store)
         self.settings = _Settings()
         self.adapter = SamacpAdapter(ans=AnsClient(base_url=ans_url))
         self.ans_url = ans_url
@@ -110,10 +117,7 @@ class ServiceState:
         self.feed = None  # set by service.feed.SimulatedFeed
         self.engine = self._build_engine()
 
-        # The gateway holds the approval queue and the tool catalogue, so both
-        # survive a reconfiguration - pending approvals must not vanish
-        # because someone changed a threshold.
-        self.catalog = _starter_catalog()
+        self.catalog = starter_catalog()
         self.builder = PacketBuilder(catalog=self.catalog)
         self.approvals = ApprovalQueue()
         self.gateway = AttestGateway(
@@ -155,7 +159,7 @@ class ServiceState:
         )
 
     def reconfigure(self, **changes) -> None:
-        """Apply setting changes and rebuild the engine.
+        """Apply setting changes and rebuild this tenant's engine.
 
         Trust state survives, because it lives in the store rather than the
         engine. Changing gamma mid-flight does re-interpret the accumulated
@@ -167,8 +171,7 @@ class ServiceState:
                 setattr(self.settings, key, value)
         self.engine = self._build_engine()
         # Re-point the gateway, or it keeps deciding against the engine that
-        # was just replaced - approvals would resolve into state nothing reads,
-        # and the two would drift apart silently.
+        # was just replaced - approvals would resolve into state nothing reads.
         if getattr(self, "gateway", None) is not None:
             self.gateway.engine = self.engine
 
@@ -195,11 +198,51 @@ class ServiceState:
     def subscribers(self) -> int:
         return len(self._subscribers)
 
+
+class ServiceState:
+    """Global state: the database, the key store, and every tenant context.
+
+    Args:
+        db_path: SQLite file, or ``":memory:"`` for tests.
+        ans_url: Agent Name Service base URL used by the SAMACP adapter.
+        bootstrap_token: Initial admin credential, from the environment.
+    """
+
+    def __init__(
+        self,
+        db_path: str = "attest.db",
+        ans_url: str = "http://localhost:5000",
+        bootstrap_token: str | None = None,
+    ) -> None:
+        self._base = SqliteStore(db_path)
+        self.ans_url = ans_url
+        self.keys = KeyStore(self._base._conn, bootstrap_token=bootstrap_token)
+        self._tenants: dict[str, TenantContext] = {}
+
+    def tenant(self, tenant_id: str) -> TenantContext:
+        """Context for ``tenant_id``, created on first use."""
+        context = self._tenants.get(tenant_id)
+        if context is None:
+            context = TenantContext(
+                tenant_id, self._base.for_tenant(tenant_id), self.ans_url
+            )
+            self._tenants[tenant_id] = context
+        return context
+
+    @property
+    def tenants(self) -> list[str]:
+        return sorted(self._tenants)
+
+    async def shutdown(self) -> None:
+        for context in self._tenants.values():
+            if context.feed is not None:
+                await context.feed.stop()
+
     def close(self) -> None:
-        self.store.close()
+        self._base.close()
 
 
-def _starter_catalog() -> ToolCatalog:
+def starter_catalog() -> ToolCatalog:
     """A few tools declared so a fresh install does nothing surprising.
 
     Everything not listed is treated as irreversible and sensitive, which is

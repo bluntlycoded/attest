@@ -202,3 +202,32 @@ Early. The engine, metrics, benchmark, delegation-chain trust, SAMACP adapter, r
 ## Licence
 
 MIT
+
+## Authentication and tenancy
+
+The service has no anonymous path. A security control that answers to whoever asks is worse than no control, because it is trusted.
+
+```bash
+export ATTEST_BOOTSTRAP_KEY="$(openssl rand -base64 32)"
+uvicorn service.app:app --port 8317
+```
+
+The first credential comes from the environment rather than a database row, so an unconfigured install is unusable rather than open. Mint narrower keys from it:
+
+```bash
+curl -X POST localhost:8317/keys -H "Authorization: Bearer $ATTEST_BOOTSTRAP_KEY" -d '{"role":"ingest","label":"gateway-node-1"}'
+```
+
+Three roles, ordered by blast radius rather than seniority:
+
+| Role | Can | Cannot |
+|---|---|---|
+| `ingest` | Submit traffic and tool calls | Approve, read the fleet, configure |
+| `approver` | Also answer approvals, read the fleet | Change thresholds or mint keys |
+| `admin` | Everything | — |
+
+An ingest credential sits on every gateway node, so it is the one most likely to leak and the one that can do least. An approver deliberately cannot change configuration: a reviewer able to widen the thresholds that decide what reaches them could quietly stop being asked.
+
+Tokens are stored as SHA-256 digests and returned exactly once. Each tenant gets its own engine, gateway, approval queue and catalogue over a tenant-scoped store — isolation by construction rather than by a `WHERE` clause somebody has to remember. That extends to rubber-stamp statistics, which would otherwise let one customer's reviewers mask another's.
+
+The console's key is browser-visible by construction, so give it `approver`, never `admin`.

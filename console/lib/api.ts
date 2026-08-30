@@ -6,6 +6,19 @@ import type { Decision } from "./types";
 export const API =
   process.env.NEXT_PUBLIC_ATTEST_API ?? "http://localhost:8317";
 
+/**
+ * The service has no anonymous path, so the console has to present a
+ * credential. This is a browser-visible value by construction, which means it
+ * should be an approver key rather than an admin one - a console that can
+ * rewrite the thresholds deciding what reaches its reviewers hands anyone with
+ * devtools the ability to stop being asked.
+ */
+export const TOKEN = process.env.NEXT_PUBLIC_ATTEST_TOKEN ?? "";
+
+function authHeaders(): Record<string, string> {
+  return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -19,7 +32,11 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+      ...init?.headers,
+    },
     cache: "no-store",
   });
   if (!response.ok) {
@@ -121,7 +138,12 @@ export function useDecisionStream(limit = 200): {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const source = new EventSource(`${API}/decisions/stream`);
+    // EventSource cannot set headers, so the stream carries its token in the
+    // query string. That puts a credential in server logs, which is why the
+    // console's key should be a narrow one and rotated like any other secret.
+    const source = new EventSource(
+      `${API}/decisions/stream${TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : ""}`,
+    );
 
     source.onopen = () => setConnected(true);
     source.onerror = () => setConnected(false);

@@ -296,3 +296,39 @@ class ApproverOut(BaseModel):
     latency_cv: float
     hollow_score: float
     hollow: bool
+
+
+# ---------------------------------------------------------------------- keys
+
+
+class IssueKeyIn(BaseModel):
+    role: Literal["ingest", "approver", "admin"]
+    label: str = ""
+
+
+class IssuedKeyOut(BaseModel):
+    """The one and only time a token is returned."""
+
+    key_id: str
+    token: str
+    tenant_id: str
+    role: str
+    label: str
+    warning: str
+
+
+class KeyOut(BaseModel):
+    key_id: str
+    tenant_id: str
+    role: str
+    label: str
+    created_at: float
+    last_used: float | None
+    revoked: int
+
+
+class WhoAmIOut(BaseModel):
+    key_id: str
+    tenant_id: str
+    role: str
+    label: str

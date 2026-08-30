@@ -19,6 +19,9 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from attest.tenancy import Principal, Role
 
 from attest.metrics import bootstrap_ci, evaluate
 from attest.policy import Budget, PolicyParams
@@ -42,6 +45,10 @@ from .schemas import (
     ToolCallIn,
     ToolRiskIn,
     VerdictOut,
+    IssueKeyIn,
+    IssuedKeyOut,
+    KeyOut,
+    WhoAmIOut,
     BenchmarkIn,
     BenchmarkOut,
     ConfigIn,
@@ -56,7 +63,7 @@ from .schemas import (
     PolicyResult,
     TrajectoryPoint,
 )
-from .state import ServiceState
+from .state import ServiceState, TenantContext
 
 DB_PATH = os.environ.get("ATTEST_DB", "attest.db")
 ANS_URL = os.environ.get("ATTEST_ANS_URL", "http://localhost:5000")
@@ -65,25 +72,99 @@ CORS_ORIGINS = os.environ.get(
     "ATTEST_CORS_ORIGINS", "http://localhost:3317,http://127.0.0.1:3317"
 ).split(",")
 
+BOOTSTRAP_TOKEN = os.environ.get("ATTEST_BOOTSTRAP_KEY") or None
+
 _state: ServiceState | None = None
+_bearer = HTTPBearer(auto_error=False)
 
 
-def get_state() -> ServiceState:
+def _global_state() -> ServiceState:
     if _state is None:  # pragma: no cover - only before startup
         raise RuntimeError("service state not initialised")
     return _state
 
 
+def principal(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    state: ServiceState = Depends(_global_state),
+) -> Principal:
+    """Resolve the caller, or refuse.
+
+    There is no anonymous path. A security control that answers to whoever
+    asks is worse than no control, because it is trusted. The first credential
+    comes from ATTEST_BOOTSTRAP_KEY rather than from a row, so an unconfigured
+    database is unusable rather than open.
+    """
+    token = credentials.credentials if credentials else None
+    if token is None:
+        # EventSource cannot set headers, so the SSE stream is the one place a
+        # token may arrive as a query parameter. That puts a credential in
+        # access logs, so it is allowed for that path alone rather than
+        # everywhere.
+        if request.url.path == "/decisions/stream":
+            token = request.query_params.get("token")
+    who = state.keys.authenticate(token)
+    if who is None:
+        raise HTTPException(
+            401,
+            "a valid bearer token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return who
+
+
+def _at_least(role: Role):
+    """Dependency factory enforcing a minimum role."""
+
+    def guard(who: Principal = Depends(principal)) -> Principal:
+        try:
+            who.require(role)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        return who
+
+    return guard
+
+
+require_ingest = _at_least(Role.INGEST)
+require_approver = _at_least(Role.APPROVER)
+require_admin = _at_least(Role.ADMIN)
+
+
+def get_state(
+    who: Principal = Depends(require_ingest),
+    state: ServiceState = Depends(_global_state),
+) -> TenantContext:
+    """The caller's tenant context - the only data they can reach."""
+    return state.tenant(who.tenant_id)
+
+
+def get_reader(
+    who: Principal = Depends(require_approver),
+    state: ServiceState = Depends(_global_state),
+) -> TenantContext:
+    return state.tenant(who.tenant_id)
+
+
+def get_admin(
+    who: Principal = Depends(require_admin),
+    state: ServiceState = Depends(_global_state),
+) -> TenantContext:
+    return state.tenant(who.tenant_id)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _state
-    _state = ServiceState(db_path=DB_PATH, ans_url=ANS_URL)
+    _state = ServiceState(
+        db_path=DB_PATH, ans_url=ANS_URL, bootstrap_token=BOOTSTRAP_TOKEN
+    )
     try:
         yield
     finally:
-        if _state is not None and _state.feed is not None:
-            await _state.feed.stop()
         if _state is not None:
+            await _state.shutdown()
             _state.close()
         _state = None
 
@@ -108,7 +189,7 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health(state: ServiceState = Depends(get_state)) -> dict:
+async def health(state: TenantContext = Depends(get_state)) -> dict:
     return {
         "status": "ok",
         "agents": state.store.count(),
@@ -118,7 +199,7 @@ async def health(state: ServiceState = Depends(get_state)) -> dict:
     }
 
 
-def _config_out(state: ServiceState) -> ConfigOut:
+def _config_out(state: TenantContext) -> ConfigOut:
     params = state.trust_params
     s = state.settings
     return ConfigOut(
@@ -137,13 +218,13 @@ def _config_out(state: ServiceState) -> ConfigOut:
 
 
 @app.get("/config", response_model=ConfigOut)
-async def get_config(state: ServiceState = Depends(get_state)) -> ConfigOut:
+async def get_config(state: TenantContext = Depends(get_reader)) -> ConfigOut:
     return _config_out(state)
 
 
 @app.put("/config", response_model=ConfigOut)
 async def put_config(
-    body: ConfigIn, state: ServiceState = Depends(get_state)
+    body: ConfigIn, state: TenantContext = Depends(get_admin)
 ) -> ConfigOut:
     changes = body.model_dump(exclude_unset=True)
     # `unlimited_budget` is a separate flag because None already means
@@ -183,7 +264,7 @@ def _to_out(decision) -> DecisionOut:
 
 @app.post("/observe", response_model=DecisionOut)
 async def observe(
-    body: EnvelopeIn, state: ServiceState = Depends(get_state)
+    body: EnvelopeIn, state: TenantContext = Depends(get_state)
 ) -> DecisionOut:
     """Score one already-verified message."""
     from attest import Envelope
@@ -207,7 +288,7 @@ async def observe(
 
 @app.post("/ingest/samacp", response_model=DecisionOut)
 async def ingest_samacp(
-    request: Request, state: ServiceState = Depends(get_state)
+    request: Request, state: TenantContext = Depends(get_state)
 ) -> DecisionOut:
     """Score one raw SAMACP envelope, verifying it first.
 
@@ -235,7 +316,7 @@ async def ingest_samacp(
 async def list_agents(
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    state: ServiceState = Depends(get_state),
+    state: TenantContext = Depends(get_reader),
 ) -> list[AgentOut]:
     """Fleet view, least-trusted first."""
     return [AgentOut(**vars(s)) for s in state.store.summaries(limit, offset)]
@@ -243,7 +324,7 @@ async def list_agents(
 
 @app.get("/agents/{agent_id}", response_model=AgentOut)
 async def get_agent(
-    agent_id: str, state: ServiceState = Depends(get_state)
+    agent_id: str, state: TenantContext = Depends(get_reader)
 ) -> AgentOut:
     for summary in state.store.summaries(limit=1000):
         if summary.agent_id == agent_id:
@@ -255,7 +336,7 @@ async def get_agent(
 async def trajectory(
     agent_id: str,
     limit: int = Query(300, ge=1, le=5000),
-    state: ServiceState = Depends(get_state),
+    state: TenantContext = Depends(get_reader),
 ) -> list[TrajectoryPoint]:
     return [
         TrajectoryPoint(**point) for point in state.log.trajectory(agent_id, limit=limit)
@@ -270,7 +351,7 @@ async def decisions(
     reason: str | None = Query(
         None, description="Comma-separated decision reasons to include"
     ),
-    state: ServiceState = Depends(get_state),
+    state: TenantContext = Depends(get_reader),
 ) -> list[DecisionOut]:
     reasons = [r.strip() for r in reason.split(",") if r.strip()] if reason else None
     rows = state.log.recent(
@@ -294,7 +375,7 @@ async def decisions(
 
 
 @app.get("/decisions/stream")
-async def stream(state: ServiceState = Depends(get_state)) -> StreamingResponse:
+async def stream(state: TenantContext = Depends(get_reader)) -> StreamingResponse:
     """Server-sent events, one per decision."""
     queue = state.subscribe()
 
@@ -320,7 +401,7 @@ async def stream(state: ServiceState = Depends(get_state)) -> StreamingResponse:
 
 
 @app.get("/metrics", response_model=MetricsOut)
-async def metrics(state: ServiceState = Depends(get_state)) -> MetricsOut:
+async def metrics(state: TenantContext = Depends(get_reader)) -> MetricsOut:
     counters = state.log.counters()
     return MetricsOut(
         **counters,
@@ -432,7 +513,7 @@ async def frontier(body: BenchmarkIn) -> FrontierOut:
 # ----------------------------------------------------------------------- feed
 
 
-def _feed_out(state: ServiceState) -> FeedOut:
+def _feed_out(state: TenantContext) -> FeedOut:
     feed = state.feed
     if feed is None:
         return FeedOut(
@@ -448,13 +529,13 @@ def _feed_out(state: ServiceState) -> FeedOut:
 
 
 @app.get("/feed", response_model=FeedOut)
-async def get_feed(state: ServiceState = Depends(get_state)) -> FeedOut:
+async def get_feed(state: TenantContext = Depends(get_reader)) -> FeedOut:
     return _feed_out(state)
 
 
 @app.post("/feed/start", response_model=FeedOut)
 async def start_feed(
-    body: FeedIn, state: ServiceState = Depends(get_state)
+    body: FeedIn, state: TenantContext = Depends(get_admin)
 ) -> FeedOut:
     """Start synthetic traffic so the console has something to show."""
     if state.feed is not None and state.feed.running:
@@ -491,14 +572,14 @@ async def start_feed(
 
 
 @app.post("/feed/stop", response_model=FeedOut)
-async def stop_feed(state: ServiceState = Depends(get_state)) -> FeedOut:
+async def stop_feed(state: TenantContext = Depends(get_admin)) -> FeedOut:
     if state.feed is not None:
         await state.feed.stop()
     return _feed_out(state)
 
 
 @app.post("/reset")
-async def reset(state: ServiceState = Depends(get_state)) -> dict:
+async def reset(state: TenantContext = Depends(get_admin)) -> dict:
     """Clear all agent state and decisions. Intended for demos."""
     if state.feed is not None:
         await state.feed.stop()
@@ -529,7 +610,7 @@ def _verdict_out(result) -> VerdictOut:
 
 
 @app.get("/catalog", response_model=CatalogOut)
-async def get_catalog(state: ServiceState = Depends(get_state)) -> CatalogOut:
+async def get_catalog(state: TenantContext = Depends(get_reader)) -> CatalogOut:
     """What each tool is declared to do. The operator owns this, not the agent."""
     return CatalogOut(
         tools={
@@ -546,7 +627,7 @@ async def get_catalog(state: ServiceState = Depends(get_state)) -> CatalogOut:
 
 @app.put("/catalog/{tool}", response_model=CatalogOut)
 async def declare_tool(
-    tool: str, body: ToolRiskIn, state: ServiceState = Depends(get_state)
+    tool: str, body: ToolRiskIn, state: TenantContext = Depends(get_admin)
 ) -> CatalogOut:
     """Declare a tool's risk properties."""
     from attest.packet import Reversibility, ToolRisk
@@ -565,7 +646,7 @@ async def declare_tool(
 
 @app.post("/gateway/evaluate", response_model=VerdictOut)
 async def evaluate_call(
-    body: ToolCallIn, state: ServiceState = Depends(get_state)
+    body: ToolCallIn, state: TenantContext = Depends(get_state)
 ) -> VerdictOut:
     """Judge one intercepted tool call: allow, hold for a person, or deny."""
     from attest.gateway import ToolCall
@@ -595,7 +676,7 @@ async def evaluate_call(
 async def evaluate_mcp(
     request: Request,
     agent_id: str = Query(..., min_length=1),
-    state: ServiceState = Depends(get_state),
+    state: TenantContext = Depends(get_state),
 ) -> VerdictOut:
     """Judge a raw MCP ``tools/call`` request.
 
@@ -635,7 +716,7 @@ def _approval_out(request) -> ApprovalOut:
 @app.get("/approvals", response_model=list[ApprovalOut])
 async def list_approvals(
     tier: str | None = Query(None, pattern="^(owner|authority)$"),
-    state: ServiceState = Depends(get_state),
+    state: TenantContext = Depends(get_reader),
 ) -> list[ApprovalOut]:
     """Requests waiting on a person, oldest first.
 
@@ -653,7 +734,7 @@ async def list_approvals(
 
 @app.get("/approvals/{request_id}", response_model=ApprovalOut)
 async def get_approval(
-    request_id: str, state: ServiceState = Depends(get_state)
+    request_id: str, state: TenantContext = Depends(get_reader)
 ) -> ApprovalOut:
     request = state.approvals.get(request_id)
     if request is None:
@@ -663,7 +744,7 @@ async def get_approval(
 
 @app.post("/approvals/{request_id}/decide", response_model=ApprovalOut)
 async def decide_approval(
-    request_id: str, body: DecideIn, state: ServiceState = Depends(get_state)
+    request_id: str, body: DecideIn, state: TenantContext = Depends(get_reader)
 ) -> ApprovalOut:
     """Record a reviewer's answer and release or refuse the held call."""
     from attest.approval import Outcome
@@ -679,14 +760,14 @@ async def decide_approval(
 
 
 @app.post("/approvals/sweep")
-async def sweep_approvals(state: ServiceState = Depends(get_state)) -> dict:
+async def sweep_approvals(state: TenantContext = Depends(get_reader)) -> dict:
     """Age out unanswered holds. Every one becomes a denial, never a release."""
     expired = state.gateway.sweep(time.time())
     return {"expired": expired, "counts": state.approvals.counts()}
 
 
 @app.get("/approvers", response_model=list[ApproverOut])
-async def approvers(state: ServiceState = Depends(get_state)) -> list[ApproverOut]:
+async def approvers(state: TenantContext = Depends(get_reader)) -> list[ApproverOut]:
     """Whether each reviewer still appears to be reading.
 
     A hollow gate looks identical to a healthy one from the outside - the
@@ -694,3 +775,62 @@ async def approvers(state: ServiceState = Depends(get_state)) -> list[ApproverOu
     place that difference shows up.
     """
     return [ApproverOut(**vars(s)) for s in state.engine.rubber_stamp.stats()]
+
+
+# ----------------------------------------------------------------------- keys
+
+
+@app.post("/keys", response_model=IssuedKeyOut, status_code=201)
+async def issue_key(
+    body: IssueKeyIn,
+    who: Principal = Depends(require_admin),
+    state: ServiceState = Depends(_global_state),
+) -> IssuedKeyOut:
+    """Mint a credential for the caller's own tenant.
+
+    The token is returned here and nowhere else - only a digest is stored, so
+    a stolen database yields nothing usable and a lost token has to be
+    replaced rather than recovered. The tenant is taken from the caller, not
+    from the body: an admin cannot mint credentials into someone else's.
+    """
+    issued = state.keys.issue(who.tenant_id, Role(body.role), label=body.label)
+    return IssuedKeyOut(
+        key_id=issued.key_id,
+        token=issued.token,
+        tenant_id=issued.tenant_id,
+        role=issued.role.value,
+        label=issued.label,
+        warning="This token is shown once. Store it now; it cannot be recovered.",
+    )
+
+
+@app.get("/keys", response_model=list[KeyOut])
+async def list_keys(
+    who: Principal = Depends(require_admin),
+    state: ServiceState = Depends(_global_state),
+) -> list[KeyOut]:
+    """Key metadata for the caller's tenant. Never a token or a digest."""
+    return [KeyOut(**row) for row in state.keys.list_keys(who.tenant_id)]
+
+
+@app.delete("/keys/{key_id}")
+async def revoke_key(
+    key_id: str,
+    who: Principal = Depends(require_admin),
+    state: ServiceState = Depends(_global_state),
+) -> dict:
+    """Revoke a key belonging to the caller's tenant."""
+    if not state.keys.revoke(key_id, who.tenant_id):
+        raise HTTPException(404, f"unknown key {key_id!r} in this tenant")
+    return {"revoked": key_id}
+
+
+@app.get("/whoami", response_model=WhoAmIOut)
+async def whoami(who: Principal = Depends(principal)) -> WhoAmIOut:
+    """What this credential is, for a client checking its own reach."""
+    return WhoAmIOut(
+        key_id=who.key_id,
+        tenant_id=who.tenant_id,
+        role=who.role.value,
+        label=who.label,
+    )

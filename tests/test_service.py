@@ -7,9 +7,31 @@ from fastapi.testclient import TestClient  # noqa: E402
 from service import app as app_module  # noqa: E402
 
 
+BOOTSTRAP = "attest-test-bootstrap-key"
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    """An authenticated admin client for the default tenant.
+
+    The service has no anonymous path, so every fixture has to present a
+    credential. The bootstrap token comes from the environment rather than a
+    row, which is what keeps an unconfigured database unusable rather than
+    open.
+    """
     monkeypatch.setattr(app_module, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(app_module, "BOOTSTRAP_TOKEN", BOOTSTRAP)
+    with TestClient(
+        app_module.app, headers={"Authorization": f"Bearer {BOOTSTRAP}"}
+    ) as c:
+        yield c
+
+
+@pytest.fixture
+def anon(tmp_path, monkeypatch):
+    """A client with no credential at all."""
+    monkeypatch.setattr(app_module, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(app_module, "BOOTSTRAP_TOKEN", BOOTSTRAP)
     with TestClient(app_module.app) as c:
         yield c
 
@@ -369,3 +391,187 @@ def test_an_overdue_request_is_still_pending_until_swept(client):
     assert len(client.get("/approvals").json()) == 1
     client.post("/approvals/sweep")
     assert client.get("/approvals").json() == []
+
+
+# ----------------------------------------------------------- auth and tenancy
+
+
+def test_there_is_no_anonymous_path(anon):
+    """A control that answers to whoever asks is worse than no control."""
+    for method, path in (
+        ("get", "/health"),
+        ("get", "/agents"),
+        ("get", "/metrics"),
+        ("post", "/observe"),
+        ("get", "/approvals"),
+        ("get", "/keys"),
+    ):
+        response = (
+            anon.post(path, json={}) if method == "post" else anon.get(path)
+        )
+        assert response.status_code == 401, path
+
+
+def test_a_bad_token_is_refused(anon):
+    anon.headers["Authorization"] = "Bearer attest_deadbeef_nonsense"
+    assert anon.get("/health").status_code == 401
+    anon.headers["Authorization"] = "Bearer not-even-the-right-shape"
+    assert anon.get("/health").status_code == 401
+
+
+def test_whoami_reports_the_credential(client):
+    body = client.get("/whoami").json()
+    assert body["role"] == "admin"
+    assert body["tenant_id"] == "default"
+
+
+def test_a_token_is_returned_once_and_never_again(client):
+    issued = client.post("/keys", json={"role": "ingest", "label": "gw"}).json()
+    assert issued["token"].startswith("attest_")
+    assert "shown once" in issued["warning"]
+
+    listed = client.get("/keys").json()
+    assert [k["key_id"] for k in listed] == [issued["key_id"]]
+    assert all("token" not in k and "token_hash" not in k for k in listed)
+
+
+def test_an_ingest_credential_cannot_approve_or_configure(client):
+    token = client.post("/keys", json={"role": "ingest"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # It can do its job.
+    assert (
+        client.post(
+            "/gateway/evaluate",
+            json={"agent_id": "a", "tool": "search", "timestamp": 1.0},
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    # And nothing else.
+    assert client.get("/agents", headers=headers).status_code == 403
+    assert client.get("/approvals", headers=headers).status_code == 403
+    assert client.put("/config", json={"theta_low": 0.4}, headers=headers).status_code == 403
+    assert client.get("/keys", headers=headers).status_code == 403
+
+
+def test_an_approver_can_answer_but_not_rewrite_the_thresholds(client):
+    """A reviewer who could widen thresholds could stop being asked."""
+    token = client.post("/keys", json={"role": "approver"}).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert client.get("/approvals", headers=headers).status_code == 200
+    assert client.get("/agents", headers=headers).status_code == 200
+    assert client.put("/config", json={"theta_low": 0.4}, headers=headers).status_code == 403
+    assert client.post("/keys", json={"role": "admin"}, headers=headers).status_code == 403
+
+
+def test_a_revoked_key_stops_working(client):
+    issued = client.post("/keys", json={"role": "approver"}).json()
+    headers = {"Authorization": f"Bearer {issued['token']}"}
+    assert client.get("/agents", headers=headers).status_code == 200
+
+    client.delete(f"/keys/{issued['key_id']}")
+    assert client.get("/agents", headers=headers).status_code == 401
+
+
+def test_revoking_an_unknown_key_is_a_404(client):
+    assert client.delete("/keys/nope").status_code == 404
+
+
+def test_tenants_cannot_see_each_other(client, tmp_path, monkeypatch):
+    """The property the whole design of TenantContext exists to guarantee."""
+    from attest.tenancy import Role
+
+    state = app_module._global_state()
+    other = state.keys.issue("other-corp", Role.ADMIN, label="second tenant")
+    other_headers = {"Authorization": f"Bearer {other.token}"}
+
+    # Same agent id, different tenants.
+    for i in range(40):
+        client.post(
+            "/observe",
+            json={
+                "sender": "shared",
+                "recipient": "t",
+                "intent": "core",
+                "action": "q",
+                "timestamp": float(i),
+                "audit_proof": f"m{i}",
+            },
+        )
+
+    assert [a["agent_id"] for a in client.get("/agents").json()] == ["shared"]
+    assert client.get("/agents", headers=other_headers).json() == []
+    assert client.get("/metrics", headers=other_headers).json()["steps"] == 0
+    assert client.get("/agents/shared", headers=other_headers).status_code == 404
+
+
+def test_an_admin_cannot_mint_keys_into_another_tenant(client):
+    """The tenant comes from the caller, never from the request body."""
+    issued = client.post(
+        "/keys", json={"role": "admin", "label": "x", "tenant_id": "victim"}
+    ).json()
+    assert issued["tenant_id"] == "default"
+
+
+def test_approvals_are_scoped_to_a_tenant(client):
+    from attest.tenancy import Role
+
+    state = app_module._global_state()
+    other = state.keys.issue("other-corp", Role.ADMIN)
+    other_headers = {"Authorization": f"Bearer {other.token}"}
+
+    _settle_gateway(client)
+    held = client.post(
+        "/gateway/evaluate",
+        json={"agent_id": "agent-7", "tool": "wire_transfer", "timestamp": 100.0},
+    ).json()
+
+    assert len(client.get("/approvals").json()) == 1
+    assert client.get("/approvals", headers=other_headers).json() == []
+    # Nor can the other tenant answer it.
+    assert (
+        client.post(
+            f"/approvals/{held['request_id']}/decide",
+            json={"approver": "mallory", "outcome": "approved", "at": 130.0},
+            headers=other_headers,
+        ).status_code
+        == 404
+    )
+
+
+def test_a_query_token_works_only_on_the_sse_path(client):
+    """EventSource cannot set headers; that exemption is deliberately narrow.
+
+    Exercised against the dependency rather than over HTTP, because the stream
+    never completes and a test client reading it would simply hang.
+    """
+    from starlette.requests import Request
+
+    state = app_module._global_state()
+
+    def resolve(path: str):
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": path,
+                "headers": [],
+                "query_string": f"token={BOOTSTRAP}".encode(),
+            }
+        )
+        try:
+            return app_module.principal(request, None, state)
+        except Exception as exc:
+            return exc
+
+    assert resolve("/decisions/stream").role.value == "admin"
+    # The same trick must not work anywhere else.
+    for path in ("/agents", "/metrics", "/config"):
+        assert getattr(resolve(path), "status_code", None) == 401, path
+
+
+def test_a_query_token_is_ignored_on_ordinary_paths_over_http(anon):
+    assert anon.get(f"/agents?token={BOOTSTRAP}").status_code == 401
+    assert anon.get(f"/metrics?token={BOOTSTRAP}").status_code == 401

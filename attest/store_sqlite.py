@@ -27,12 +27,14 @@ __all__ = ["SqliteStore", "SqliteDecisionLog", "AgentSummary"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
-    agent_id       TEXT PRIMARY KEY,
+    agent_id       TEXT NOT NULL,
     r              REAL NOT NULL DEFAULT 0,
     s              REAL NOT NULL DEFAULT 0,
     updated_at     REAL,
     armed          INTEGER NOT NULL DEFAULT 1,
-    cooldown_until REAL NOT NULL DEFAULT 0
+    cooldown_until REAL NOT NULL DEFAULT 0,
+    tenant_id      TEXT NOT NULL DEFAULT 'default',
+    PRIMARY KEY (tenant_id, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -46,11 +48,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     enforced  INTEGER NOT NULL DEFAULT 0,
     effective_trust REAL,
     target    TEXT,
-    chain     TEXT
+    chain     TEXT,
+    tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 
-CREATE INDEX IF NOT EXISTS decisions_agent_idx ON decisions (agent_id, id DESC);
-CREATE INDEX IF NOT EXISTS decisions_action_idx ON decisions (action, id DESC);
+CREATE INDEX IF NOT EXISTS decisions_agent_idx ON decisions (tenant_id, agent_id, id DESC);
+CREATE INDEX IF NOT EXISTS decisions_action_idx ON decisions (tenant_id, action, id DESC);
 """
 
 
@@ -93,9 +96,21 @@ def _migrate(connection: sqlite3.Connection) -> None:
         ("effective_trust", "REAL"),
         ("target", "TEXT"),
         ("chain", "TEXT"),
+        ("tenant_id", "TEXT NOT NULL DEFAULT 'default'"),
     ):
         if column not in existing:
             connection.execute(f"ALTER TABLE decisions ADD COLUMN {column} {ddl}")
+
+    agent_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(agents)")
+    }
+    if "tenant_id" not in agent_columns:
+        # Pre-tenancy rows belong to the default tenant. The primary key
+        # cannot be widened in place, so they stay unique on agent_id alone -
+        # correct for a database that only ever had one tenant.
+        connection.execute(
+            "ALTER TABLE agents ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
+        )
 
 
 class SqliteStore:
@@ -105,12 +120,29 @@ class SqliteStore:
         path: Database file. Use ``":memory:"`` for tests.
     """
 
-    def __init__(self, path: str = "attest.db") -> None:
+    def __init__(self, path: str = "attest.db", tenant_id: str = "default") -> None:
         self.path = path
+        self.tenant_id = tenant_id
         self._lock = threading.Lock()
         self._conn = _connect(path)
         # Profiles are per-process and never persisted; see the module docstring.
         self._profiles: dict[str, AgentRecord] = {}
+
+    def for_tenant(self, tenant_id: str) -> "SqliteStore":
+        """A view of the same database scoped to one tenant.
+
+        Scoping the store rather than filtering at each call site is the point:
+        a forgotten WHERE clause leaks another tenant's fleet, whereas a scoped
+        store has nothing else it could return. The connection is shared; only
+        the scope differs.
+        """
+        scoped = object.__new__(SqliteStore)
+        scoped.path = self.path
+        scoped.tenant_id = tenant_id
+        scoped._lock = self._lock
+        scoped._conn = self._conn
+        scoped._profiles = {}
+        return scoped
 
     def close(self) -> None:
         with self._lock:
@@ -120,7 +152,8 @@ class SqliteStore:
         cached = self._profiles.get(agent_id)
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM agents WHERE agent_id = ?", (agent_id,)
+                "SELECT * FROM agents WHERE agent_id = ? AND tenant_id = ?",
+                (agent_id, self.tenant_id),
             ).fetchone()
 
         if row is None:
@@ -146,9 +179,10 @@ class SqliteStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO agents (agent_id, r, s, updated_at, armed, cooldown_until)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_id) DO UPDATE SET
+                INSERT INTO agents
+                    (agent_id, r, s, updated_at, armed, cooldown_until, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
                     r = excluded.r,
                     s = excluded.s,
                     updated_at = excluded.updated_at,
@@ -162,6 +196,7 @@ class SqliteStore:
                     record.trust.updated_at,
                     int(record.policy.armed),
                     record.policy.cooldown_until,
+                    self.tenant_id,
                 ),
             )
             self._conn.commit()
@@ -169,7 +204,8 @@ class SqliteStore:
     def agents(self) -> Iterator[str]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT agent_id FROM agents ORDER BY agent_id"
+                "SELECT agent_id FROM agents WHERE tenant_id = ? ORDER BY agent_id",
+                (self.tenant_id,),
             ).fetchall()
         return iter([row["agent_id"] for row in rows])
 
@@ -186,12 +222,13 @@ class SqliteStore:
                     SELECT agent_id,
                            COUNT(*) AS total,
                            SUM(CASE WHEN action = 'verify' THEN 1 ELSE 0 END) AS verified
-                    FROM decisions GROUP BY agent_id
+                    FROM decisions WHERE tenant_id = ? GROUP BY agent_id
                 ) d ON d.agent_id = a.agent_id
+                WHERE a.tenant_id = ?
                 ORDER BY (a.r + 1.0) / (a.r + a.s + 2.0) ASC, a.agent_id
                 LIMIT ? OFFSET ?
                 """,
-                (limit, offset),
+                (self.tenant_id, self.tenant_id, limit, offset),
             ).fetchall()
 
         return [
@@ -210,7 +247,10 @@ class SqliteStore:
     def count(self) -> int:
         with self._lock:
             return int(
-                self._conn.execute("SELECT COUNT(*) AS n FROM agents").fetchone()["n"]
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM agents WHERE tenant_id = ?",
+                    (self.tenant_id,),
+                ).fetchone()["n"]
             )
 
 
@@ -232,8 +272,8 @@ class SqliteDecisionLog:
                 """
                 INSERT INTO decisions
                     (agent_id, timestamp, p, trust, action, reason, enforced,
-                     effective_trust, target, chain)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     effective_trust, target, chain, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.agent_id,
@@ -248,6 +288,7 @@ class SqliteDecisionLog:
                     # Stored as a delimited string rather than a join table:
                     # chains are short and only ever read back whole.
                     ">".join(decision.chain) if decision.chain else None,
+                    self._store.tenant_id,
                 ),
             )
             self._conn.commit()
@@ -268,7 +309,7 @@ class SqliteDecisionLog:
                 buffer only ever sees decisions since it connected, which for
                 rare events like verifications is badly misleading.
         """
-        clauses, params = [], []
+        clauses, params = ["tenant_id = ?"], [self._store.tenant_id]
         if agent_id:
             clauses.append("agent_id = ?")
             params.append(agent_id)
@@ -293,9 +334,9 @@ class SqliteDecisionLog:
             rows = self._conn.execute(
                 """
                 SELECT timestamp, p, trust, action, reason FROM decisions
-                WHERE agent_id = ? ORDER BY id DESC LIMIT ?
+                WHERE agent_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT ?
                 """,
-                (agent_id, limit),
+                (agent_id, self._store.tenant_id, limit),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -315,8 +356,9 @@ class SqliteDecisionLog:
                        AVG(trust) AS mean_trust,
                        MIN(timestamp) AS first_seen,
                        MAX(timestamp) AS last_seen
-                FROM decisions
-                """
+                FROM decisions WHERE tenant_id = ?
+                """,
+                (self._store.tenant_id,),
             ).fetchone()
 
         steps = row["steps"] or 0
@@ -336,14 +378,17 @@ class SqliteDecisionLog:
         """How often each decision reason fired. Shows where the policy is binding."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT reason, COUNT(*) AS n FROM decisions GROUP BY reason"
+                "SELECT reason, COUNT(*) AS n FROM decisions WHERE tenant_id = ? "
+                "GROUP BY reason",
+                (self._store.tenant_id,),
             ).fetchall()
         return {row["reason"]: row["n"] for row in rows}
 
     def clear(self) -> None:
         """Drop all decisions and agent state. Used when resetting a demo."""
         with self._lock:
-            self._conn.execute("DELETE FROM decisions")
-            self._conn.execute("DELETE FROM agents")
+            tenant = (self._store.tenant_id,)
+            self._conn.execute("DELETE FROM decisions WHERE tenant_id = ?", tenant)
+            self._conn.execute("DELETE FROM agents WHERE tenant_id = ?", tenant)
             self._conn.commit()
         self._store._profiles.clear()
