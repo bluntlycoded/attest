@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      # The core library claims 3.10+ and no runtime dependencies. Both are
+      # easy to break by accident, so both are checked on the oldest and
+      # newest supported versions rather than assumed.
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest tests -q
+
+  core-has-no-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Installed bare, with no extras at all. If anything in the core library
+      # has quietly grown an import of requests or pydantic, this fails here
+      # rather than in someone's deployment.
+      - run: pip install -e .
+      - run: |
+          python - <<'PY'
+          import attest
+          from attest import AttestEngine, Envelope
+          engine = AttestEngine()
+          for i in range(120):
+              engine.observe(Envelope(
+                  sender="a", recipient="t", intent="core", action="q",
+                  timestamp=float(i), audit_proof=f"m{i}"))
+          assert engine.trust_of("a") > 0.9, engine.trust_of("a")
+          print("core works with zero dependencies:", attest.__version__)
+          PY
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build

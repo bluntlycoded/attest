@@ -24,13 +24,26 @@ tool call ──▶ gateway ──▶ allow          (routine, and it stays rout
 
 The last line is the part that does not exist elsewhere. An approval is evidence, so it feeds back. Thresholds move so an agent that keeps passing is interrupted less. And the system measures whether its own reviewers are still reading, because a gate that has decayed into a rubber stamp looks identical to a healthy one from every other angle — the approvals still arrive, the audit log still fills.
 
-## Install
+## Quick start
 
 ```bash
-pip install -e ".[dev]"
+make install                                   # library, service, console
+make test                                      # 366 tests
+make delegation                                # the headline result, in ten seconds
 ```
 
-The core library has **no runtime dependencies**. Python 3.10+. The SAMACP adapter and the HTTP service pull their own extras.
+To see it running:
+
+```bash
+export ATTEST_BOOTSTRAP_KEY="$(openssl rand -base64 32)"
+make api          # terminal 1  -> :8317
+make console      # terminal 2  -> :3317
+make demo         # terminal 3  -> live traffic and two actions held for a person
+```
+
+Then open <http://localhost:3317/approvals>.
+
+The core library has **no runtime dependencies** — CI installs it bare and asserts it still works. Python 3.10+. The SAMACP adapter and the HTTP service pull their own extras. Copy `.env.example` for the full set of settings.
 
 ## The pipeline
 
