@@ -1,0 +1,54 @@
+# Render blueprint. See DEPLOY.md for the ordering, which matters: the console
+# needs a token that only exists after the service is up, and the service needs
+# the console's origin for CORS.
+#
+# Render URLs are predictable — https://<name>.onrender.com — so the two
+# cross-references below are pre-filled. Change a `name` and you must change
+# the matching URL too.
+
+services:
+  # ------------------------------------------------------------------ service
+  - type: web
+    name: attest-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Free has no persistent disk and sleeps after 15 minutes idle, which for
+    # this service means losing the SQLite file, the trust state and the
+    # pending approval queue. Fine for a first look, wrong for a demo someone
+    # else opens on their own schedule.
+    plan: starter
+    region: oregon
+    # No healthCheckPath on purpose. Every route requires a bearer token, so a
+    # health probe would get a 401 and Render would mark a working deploy
+    # failed. Render falls back to checking that the port is bound.
+    disk:
+      name: attest-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      # Generated once by Render and never shown in the repo. Read it from the
+      # dashboard when you need to mint the console's key.
+      - key: ATTEST_BOOTSTRAP_KEY
+        generateValue: true
+      - key: ATTEST_CORS_ORIGINS
+        value: https://attest-console.onrender.com
+      - key: ATTEST_DB
+        value: /app/data/attest.db
+
+  # ------------------------------------------------------------------ console
+  - type: web
+    name: attest-console
+    runtime: node
+    rootDir: console
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    plan: starter
+    region: oregon
+    envVars:
+      - key: NEXT_PUBLIC_ATTEST_API
+        value: https://attest-service.onrender.com
+      # NEXT_PUBLIC_* is compiled into the browser bundle, so this is a public
+      # value by construction and changing it needs a rebuild, not a restart.
+      # Set it in the dashboard to an *approver* token, never the admin one.
+      - key: NEXT_PUBLIC_ATTEST_TOKEN
+        sync: false

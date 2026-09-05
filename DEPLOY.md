@@ -1,133 +1,190 @@
-# Hosting Attest
+# Hosting Attest on Render
 
-The console is a browser app with no server of its own. Everything it shows
-comes from the service over HTTP, so hosting the front end alone gets you a
-page that renders and then fails every request. Deploy the service first.
+Two services from one blueprint: the FastAPI service and the Next console.
+[`render.yaml`](render.yaml) declares both.
 
-Read [The console's credential is public](#the-consoles-credential-is-public)
-before you put either on the open internet.
+The console is a browser app with no server of its own — every page is a client
+component and every byte it shows comes from the service over `fetch`. That
+creates a small ordering problem, because the console needs a token that does
+not exist until the service is running. Steps 1–6 walk through it in the order
+that works.
+
+Read [The console's token is public](#the-consoles-token-is-public) before you
+hand anyone the URL.
 
 ---
 
-## 1. The service
+## 1. Connect the repo
 
-Anything that runs a container works. The process is stateful — it holds a
-SQLite file — so it wants a persistent disk and exactly one instance.
+`bluntlycoded/attest` is private, so Render needs explicit access to it.
+
+At [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
+→ connect GitHub → grant access to `bluntlycoded/attest` specifically (not "all
+repositories") → select it. Render finds `render.yaml` at the root.
+
+Name the blueprint group whatever you like and click **Apply**.
+
+## 2. Let both services build
+
+Render creates `attest-service` (Docker) and `attest-console` (Node).
+
+The service builds an image and comes up healthy. The console builds and comes
+up **broken** — it has no token yet, so every panel will show an error. That is
+expected; step 5 fixes it.
+
+`render.yaml` sets no `healthCheckPath` on purpose. Every route on the service
+requires a bearer token, so a health probe would get a 401 and Render would mark
+a perfectly working deploy as failed. Render falls back to checking the port is
+bound, which is the right check here.
+
+First Docker build takes 3–5 minutes.
+
+## 3. Read the bootstrap key
+
+Render generated it (`generateValue: true`), so it is not in the repo and never
+was.
+
+**attest-service** → **Environment** → reveal `ATTEST_BOOTSTRAP_KEY`. Copy it.
 
 ```bash
-docker build -t attest-service .
-docker run -p 8317:8317 \
-  -e ATTEST_BOOTSTRAP_KEY="$(openssl rand -hex 32)" \
-  -e ATTEST_CORS_ORIGINS="https://your-console.vercel.app" \
-  -v attest-data:/app/data \
-  attest-service
+export BOOTSTRAP="paste-it-here"
+export SERVICE="https://attest-service.onrender.com"
 ```
 
-| Variable | Required | Notes |
-| --- | --- | --- |
-| `ATTEST_BOOTSTRAP_KEY` | yes | The first admin credential. No default: an unconfigured service is unusable rather than open. |
-| `ATTEST_CORS_ORIGINS` | yes | Comma-separated. Must contain the console's exact deployed origin, scheme included, no trailing slash. |
-| `ATTEST_DB` | no | Defaults to `/app/data/attest.db` in the image. |
-| `PORT` | no | Most hosts inject this. The `CMD` already honours it. |
-
-### Host notes
-
-**Render / Railway** — point at this repo, Docker runtime, attach a disk
-mounted at `/app/data`, set the variables above. Both inject `PORT`.
-
-**Fly.io** — `fly launch --no-deploy`, then `fly volumes create attest_data
---size 1` and mount it at `/app/data` in `fly.toml`. Set
-`min_machines_running = 1`; a scaled-to-zero machine drops the SSE stream and
-loses the in-memory approval queue.
-
-**Not Vercel, not Lambda.** The service holds trust state and the pending
-approval queue in memory alongside SQLite, and serves an open SSE connection.
-Serverless gives you neither a stable process nor a writable disk.
-
-### After it starts
-
-The bootstrap key is an admin key. Mint a narrower one for the console:
+Confirm the service is alive and refusing anonymous callers:
 
 ```bash
-curl -X POST https://your-service/keys \
-  -H "Authorization: Bearer $ATTEST_BOOTSTRAP_KEY" \
+curl -sS -o /dev/null -w '%{http_code}\n' $SERVICE/health          # 401
+curl -sS $SERVICE/health -H "Authorization: Bearer $BOOTSTRAP"     # {"status":"ok",...}
+```
+
+## 4. Mint an approver key for the console
+
+The bootstrap key is an admin key. Do not put it in the console — see below.
+
+```bash
+curl -sS -X POST $SERVICE/keys \
+  -H "Authorization: Bearer $BOOTSTRAP" \
   -H 'Content-Type: application/json' \
-  -d '{"label":"console","role":"approver"}'
+  -d '{"role":"approver","label":"console"}'
 ```
 
-The token comes back once and is stored only as a SHA-256 hash. Losing it
-means minting another.
+The token comes back **once**. Only a SHA-256 digest is stored, so losing it
+means minting another rather than recovering this one.
+
+## 5. Give the console its token
+
+**attest-console** → **Environment** → add:
+
+| Key | Value |
+| --- | --- |
+| `NEXT_PUBLIC_ATTEST_TOKEN` | the approver token from step 4 |
+
+`NEXT_PUBLIC_ATTEST_API` is already set by the blueprint.
+
+Saving triggers a rebuild, and it has to: `NEXT_PUBLIC_*` values are compiled
+into the JavaScript bundle at build time, not read at runtime. Changing this
+token later always means a redeploy, never just a restart.
+
+## 6. Check CORS lines up
+
+`render.yaml` pre-fills the service's `ATTEST_CORS_ORIGINS` with
+`https://attest-console.onrender.com`, which is right as long as you kept the
+default names. If Render appended a suffix to avoid a collision, or you renamed
+either service, fix `ATTEST_CORS_ORIGINS` on **attest-service** to the console's
+actual origin — scheme included, no trailing slash — and redeploy it.
+
+Open the console. Panels load, and the decisions page shows a live stream
+indicator once SSE connects.
 
 ---
 
-## 2. The console
+## Seeding it with something to look at
 
-Vercel is the path of least resistance — the app has one server-rendered route
-(`/agents/[id]`), so a plain static export would need that route rewritten to a
-query parameter first.
-
-1. Import the repo at [vercel.com/new](https://vercel.com/new).
-2. **Root Directory: `console`.** Framework and build command are detected.
-3. Environment variables:
-
-   | Variable | Value |
-   | --- | --- |
-   | `NEXT_PUBLIC_ATTEST_API` | `https://your-service` — no trailing slash |
-   | `NEXT_PUBLIC_ATTEST_TOKEN` | the approver token from above |
-
-4. Deploy, then put the resulting origin into the service's
-   `ATTEST_CORS_ORIGINS` and restart it.
-
-CLI equivalent:
+A fresh deploy has an empty fleet. `make demo` targets `localhost`, so against a
+hosted service run its calls directly. Start the simulated traffic:
 
 ```bash
-cd console && npx vercel --prod
+curl -sS -X POST $SERVICE/feed/start \
+  -H "Authorization: Bearer $BOOTSTRAP" -H 'Content-Type: application/json' \
+  -d '{"agents":14,"steps_per_second":40,"seed":7,"auto_tune":true}'
 ```
 
-**Netlify or Cloudflare Pages** work the same way: base directory `console`,
-build `npm run build`, and their respective Next adapters. Both need the same
-two `NEXT_PUBLIC_` variables.
+Then drive one agent into a hold:
 
-### Self-hosting the console instead
+```bash
+curl -sS -X POST $SERVICE/gateway/evaluate \
+  -H "Authorization: Bearer $BOOTSTRAP" -H 'Content-Type: application/json' \
+  -d '{"agent_id":"svc-billing","tool":"wire_transfer","resource":"acct-9912",
+       "arguments":{"amount":50000},"intent":"pay_invoice"}'
+```
 
-`npm run build && npm run start` serves it on 3317 behind any reverse proxy.
-Put it on the same origin as the service and the CORS entry becomes
-unnecessary.
+The feed keeps running server-side, so the console has live traffic whenever
+anyone opens it.
 
 ---
 
-## The console's credential is public
+## Plans, and what the free tier actually costs you
 
-`NEXT_PUBLIC_*` variables are compiled into the JavaScript bundle. Whatever
-token you give the console is readable by anyone who opens devtools on the
-deployed page. This is a property of browser apps, not a bug here, but it has
-two consequences worth being deliberate about.
+`render.yaml` asks for **Starter** on both ($7/month each). That is deliberate,
+and it is the one place free is not merely slower but wrong:
 
-**Use an approver key, never the bootstrap admin key.** An admin token in the
-bundle hands any visitor the ability to rewrite the thresholds that decide what
-reaches a reviewer — that is, the ability to stop being asked. That is a
-strictly worse outcome than having no gate, because the gate is still trusted.
+- **Free has no persistent disk.** The service keeps trust state and the
+  approval queue in memory alongside a SQLite file. Without a disk, every
+  restart and every deploy starts from an empty fleet.
+- **Free sleeps after 15 minutes idle**, with a ~50 second cold start. For a
+  demo link someone else opens on their own schedule, that is a minute of
+  spinner followed by an empty dashboard.
+
+If you want to spend nothing: set both to `free`, drop the `disk:` block (Render
+rejects a disk on a free plan), and re-seed with the curl calls above
+immediately before anyone looks. The console is stateless and is genuinely fine
+on free.
+
+Only ever run **one instance** of the service. Scaling it horizontally gives
+each instance its own approval queue and its own SQLite file, so an approval
+raised by one is invisible to the others.
+
+---
+
+## The console's token is public
+
+`NEXT_PUBLIC_*` is compiled into the bundle. Whatever token the console holds is
+readable by anyone who opens devtools on the deployed page. That is a property
+of browser apps, not a flaw here — but two consequences are worth being
+deliberate about.
+
+**Approver, never admin.** An admin token in the bundle hands any visitor the
+ability to rewrite the thresholds that decide what reaches a reviewer — that is,
+the ability to stop being asked. That is worse than having no gate, because the
+gate is still trusted.
 
 **Three parts of the console need admin and will return 403 under an approver
-key**: Settings (`PUT /config`), the feed controls (`/feed/start`,
-`/feed/stop`), and Reset. The queue, decisions, frontier and oversight views
-all work fine. For a public demo, either accept those three being read-only, or
-put the whole console behind access control — Vercel password protection, an
-SSO proxy, or a private deployment — and only then give it an admin token.
+key**: Settings (`PUT /config`), the feed start/stop controls, and Reset. The
+approval queue, decisions, frontier and the oversight table all work normally.
+For a public demo, either accept those three being inert — the curl calls above
+cover what they do — or put the console behind Render's IP allowlist or an
+auth proxy and only then give it an admin token.
 
-**Rotate the console token like any other secret.** The SSE stream carries it
-as a query parameter, because `EventSource` cannot set headers, which means it
-lands in access logs.
+**Rotate it like any other secret.** `EventSource` cannot set headers, so the
+SSE stream carries the token as a query parameter, which puts it in access logs.
 
 ---
 
-## Verifying a deploy
+## Elsewhere
 
-```bash
-curl -sS https://your-service/health -H "Authorization: Bearer $TOKEN"
-```
+The same two pieces deploy anywhere that runs a container plus anywhere that
+runs Next. Fly.io needs `fly volumes create` mounted at `/app/data` and
+`min_machines_running = 1`. Vercel works for the console (root directory
+`console`, same two `NEXT_PUBLIC_` variables) but not for the service, which
+needs a stable process and a writable disk.
 
-Expect `{"status":"ok", ...}`. Then open the console: a green stream indicator
-on the decisions page means SSE is getting through the host's proxy. If the
-page loads but every panel shows an error, it is almost always CORS — check
-that `ATTEST_CORS_ORIGINS` matches the console origin exactly.
+## When something is wrong
+
+| Symptom | Cause |
+| --- | --- |
+| Every panel errors, browser console says CORS | `ATTEST_CORS_ORIGINS` does not match the console origin exactly |
+| Every panel errors with 401 | `NEXT_PUBLIC_ATTEST_TOKEN` unset, or set after the last build |
+| Settings and feed controls 403 | Working as intended — the console holds an approver key |
+| Stream indicator never turns green | The token is wrong for the stream too; check `/decisions/stream?token=…` directly |
+| Dashboard empty after a redeploy | Free plan, no disk. See the plans section |
