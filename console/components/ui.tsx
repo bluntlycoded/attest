@@ -211,8 +211,12 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 export function ErrorNote({ message }: { message: string }) {
-  const unauthenticated =
-    message.toLowerCase().includes("bearer") || message.includes("401");
+  const lower = message.toLowerCase();
+  const unauthenticated = lower.includes("bearer") || message.includes("401");
+  // Refused for lack of privilege, not lack of a credential. Telling someone
+  // to check whether the service is running would send them looking for an
+  // outage that is not there - the service answered, and said no.
+  const forbidden = lower.includes("cannot act as") || message.includes("403");
   return (
     <div className="rounded border border-rose-900 bg-rose-950/40 px-3 py-2 text-[12px] text-rose-300">
       {message}
@@ -221,6 +225,14 @@ export function ErrorNote({ message }: { message: string }) {
           <>
             The service has no anonymous path. Set{" "}
             <code>NEXT_PUBLIC_ATTEST_TOKEN</code> to an approver key.
+          </>
+        ) : forbidden ? (
+          <>
+            Working as designed. A deployed console holds an approver key,
+            because <code>NEXT_PUBLIC_</code> values ship inside the browser
+            bundle — an admin key here would let any visitor rewrite the
+            thresholds that decide what reaches a reviewer. Run this one from a
+            terminal with the admin key instead.
           </>
         ) : (
           <>
