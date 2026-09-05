@@ -1,0 +1,16 @@
+.git
+.github
+console
+tests
+examples
+data
+*.db
+*.db-wal
+*.db-shm
+__pycache__
+*.egg-info
+.pytest_cache
+.venv
+venv
+.env
+.env.*

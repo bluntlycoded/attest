@@ -45,6 +45,8 @@ Then open <http://localhost:3317/approvals>.
 
 The core library has **no runtime dependencies** — CI installs it bare and asserts it still works. Python 3.10+. The SAMACP adapter and the HTTP service pull their own extras. Copy `.env.example` for the full set of settings.
 
+To put it on the internet instead, see [DEPLOY.md](DEPLOY.md) — including why the console's token is public by construction and what that means for which key you give it.
+
 ## The pipeline
 
 Three stages, of which only the first would ever be learned:
